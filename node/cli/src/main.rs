@@ -472,7 +472,8 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         let max_mem_fraction = config.max_memory_fraction;
         let result = if !config.force_cpu {
             // GPU training with watchdog (timeout + catch_unwind)
-            let sps = gpu_secs_per_step.unwrap_or(10.0);
+            // force_batch_size without calibration: use generous default (no hang risk, just slow first round)
+            let sps = gpu_secs_per_step.unwrap_or(if config.force_batch_size.is_some() { 300.0 } else { 10.0 });
             let mem_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let mem_abort_clone = mem_abort.clone();
             // Move error_buffer into watchdog, get it back after training
