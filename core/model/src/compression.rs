@@ -35,6 +35,8 @@ pub struct CompressionConfig {
     pub zstd_level: i32,
     pub min_top_k_fraction: f32,
     pub max_top_k_fraction: f32,
+    /// Allocate top-k budget per tensor proportionally to gradient norm.
+    pub per_tensor_adaptive: bool,
 }
 
 impl Default for CompressionConfig {
@@ -45,6 +47,7 @@ impl Default for CompressionConfig {
             zstd_level: 3,
             min_top_k_fraction: 0.001,
             max_top_k_fraction: 0.1,
+            per_tensor_adaptive: true,
         }
     }
 }
@@ -102,16 +105,58 @@ pub struct SparseDelta {
 
 /// Top-k sparsification: keep only the largest elements by magnitude.
 /// Indices are SORTED — critical for zstd compressibility.
+///
+/// When `per_tensor_adaptive` is true, the top-k budget is distributed across
+/// tensors proportionally to their L2 norm. Tensors with large gradients get
+/// more of the budget; tensors with near-zero gradients may be skipped entirely.
+/// The total number of kept elements is approximately the same as uniform k.
 pub fn sparsify_topk(
     delta: &HashMap<String, Vec<f32>>,
     k_fraction: f32,
 ) -> (HashMap<String, Vec<f32>>, HashMap<String, Vec<u32>>, HashMap<String, Vec<f32>>) {
+    sparsify_topk_impl(delta, k_fraction, false)
+}
+
+/// Per-tensor adaptive top-k: allocate budget by gradient norm.
+pub fn sparsify_topk_adaptive(
+    delta: &HashMap<String, Vec<f32>>,
+    k_fraction: f32,
+) -> (HashMap<String, Vec<f32>>, HashMap<String, Vec<u32>>, HashMap<String, Vec<f32>>) {
+    sparsify_topk_impl(delta, k_fraction, true)
+}
+
+fn sparsify_topk_impl(
+    delta: &HashMap<String, Vec<f32>>,
+    k_fraction: f32,
+    per_tensor_adaptive: bool,
+) -> (HashMap<String, Vec<f32>>, HashMap<String, Vec<u32>>, HashMap<String, Vec<f32>>) {
+    // Compute per-tensor norms for adaptive budget allocation
+    let tensor_norms: HashMap<&str, f64> = if per_tensor_adaptive {
+        delta.iter().map(|(name, flat)| {
+            let norm = flat.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+            (name.as_str(), norm)
+        }).collect()
+    } else {
+        HashMap::new()
+    };
+    let total_norm: f64 = tensor_norms.values().sum();
+    // Total budget in number of elements
+    let total_params: usize = delta.values().map(|v| v.len()).sum();
+    let total_budget = (total_params as f64 * k_fraction as f64).ceil() as usize;
+
     let mut sparse = HashMap::new();
     let mut all_indices = HashMap::new();
     let mut all_values = HashMap::new();
 
     for (name, flat) in delta {
-        let k = ((flat.len() as f32 * k_fraction).ceil() as usize).max(1);
+        let k = if per_tensor_adaptive && total_norm > 0.0 {
+            // Allocate budget proportionally to this tensor's norm
+            let frac = tensor_norms.get(name.as_str()).copied().unwrap_or(0.0) / total_norm;
+            let k = (total_budget as f64 * frac).ceil() as usize;
+            k.max(1).min(flat.len())
+        } else {
+            ((flat.len() as f32 * k_fraction).ceil() as usize).max(1)
+        };
 
         // Find top-k by absolute value
         let mut indexed: Vec<(usize, f32)> = flat.iter().copied().enumerate().collect();
@@ -188,7 +233,11 @@ pub fn build_sparse_delta(
     let delta_with_error = error_buffer.apply(delta);
 
     // Step 2: Top-k sparsification
-    let (sparse, indices, values) = sparsify_topk(&delta_with_error, config.top_k_fraction);
+    let (sparse, indices, values) = if config.per_tensor_adaptive {
+        sparsify_topk_adaptive(&delta_with_error, config.top_k_fraction)
+    } else {
+        sparsify_topk(&delta_with_error, config.top_k_fraction)
+    };
     error_buffer.update(&delta_with_error, &sparse);
 
     // Step 3: Optional INT8 quantization
@@ -280,7 +329,11 @@ pub fn compress_delta(
     let raw_param_bytes = (num_params_total * 4) as u64; // f32 = 4 bytes
 
     // Step 2: Top-k sparsification
-    let (sparse, indices, values) = sparsify_topk(&delta_with_error, config.top_k_fraction);
+    let (sparse, indices, values) = if config.per_tensor_adaptive {
+        sparsify_topk_adaptive(&delta_with_error, config.top_k_fraction)
+    } else {
+        sparsify_topk(&delta_with_error, config.top_k_fraction)
+    };
     error_buffer.update(&delta_with_error, &sparse);
     let sparse_norm = delta_l2_norm(&sparse);
     let num_params_kept = delta_nonzero_count(&sparse);

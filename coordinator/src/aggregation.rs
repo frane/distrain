@@ -219,6 +219,19 @@ pub async fn run_aggregation(
             contrib.weight, contrib.inner_steps, staleness,
         );
 
+        // Norm rejection: reject outlier deltas (>10x running average)
+        if !per_delta_norms.is_empty() {
+            let avg_norm: f64 = per_delta_norms.iter().sum::<f64>() / per_delta_norms.len() as f64;
+            if dnorm > avg_norm * 10.0 {
+                warn!(
+                    "Rejecting outlier delta from {} — norm {dnorm:.4} is >10x avg {avg_norm:.4}",
+                    &contrib.node_id.0[..12],
+                );
+                rejected += 1;
+                continue;
+            }
+        }
+
         per_delta_norms.push(dnorm);
         *staleness_counts.entry(staleness).or_insert(0) += 1usize;
         loss_sum += contrib.training_loss;
