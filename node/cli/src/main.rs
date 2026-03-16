@@ -413,9 +413,11 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                 }
             }
 
-            if !use_gpu && config.force_batch_size.is_none() {
+            if !use_gpu {
                 config.force_cpu = true;
-                h_mini = min_h;
+                if config.force_batch_size.is_none() {
+                    h_mini = min_h;
+                }
                 info!("Using CPU, starting with H_mini = {h_mini} (will refine from first round timing)");
             }
 
@@ -511,6 +513,13 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             match watchdog_result {
                 Ok(r) => Ok(r),
                 Err(trainer::TrainingFailure::GpuHung { timeout_secs }) => {
+                    if config.force_batch_size.is_some() {
+                        // force_batch_size means user trusts GPU; retry instead of falling back
+                        warn!(
+                            "GPU hung during training (timeout {timeout_secs:.0}s) — retrying on GPU (force_batch_size set)"
+                        );
+                        continue;
+                    }
                     warn!(
                         "GPU hung during training (timeout {timeout_secs:.0}s) — falling back to CPU permanently"
                     );
