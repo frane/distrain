@@ -1,0 +1,69 @@
+services:
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - coordinator
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: distrain
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  coordinator:
+    build:
+      context: ..
+      dockerfile: coordinator/Dockerfile
+    environment:
+      PORT: "8000"
+      HOST: "0.0.0.0"
+      R2_ENDPOINT: http://minio:9000
+      R2_BUCKET: distrain-training
+      R2_ACCESS_KEY_ID: minioadmin
+      R2_SECRET_ACCESS_KEY: minioadmin
+      MIN_CONTRIBUTIONS: "3"
+    ports:
+      - "8000:8000"
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  node-docker:
+    build:
+      context: ..
+      dockerfile: node/cli/Dockerfile
+    volumes:
+      - ../node/cli/node-docker.toml:/etc/distrain/node.toml:ro
+    environment:
+      RUST_LOG: info
+    depends_on:
+      - coordinator

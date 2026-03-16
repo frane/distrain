@@ -1,0 +1,23 @@
+[package]
+name = "distrain-model"
+version = "0.1.0"
+edition = "2021"
+description = "DistrainTransformer implemented in Burn — pure Rust ML"
+
+[features]
+default = ["zstd-compression"]
+zstd-compression = ["dep:zstd"]
+
+[dependencies]
+burn = { workspace = true, features = ["autodiff"] }
+burn-wgpu = { workspace = true, default-features = false, features = ["std", "autotune"] }
+burn-ndarray = { workspace = true }
+safetensors = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+zstd = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

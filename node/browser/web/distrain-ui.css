@@ -1,0 +1,58 @@
+/* Distrain Node — Shared UI Stylesheet
+   Used by: browser, desktop (Tauri), iOS, Android */
+:root {
+  --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
+  --text: #e4e4e7; --dim: #71717a; --accent: #6366f1;
+  --success: #22c55e; --danger: #ef4444; --warning: #f59e0b;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+.app { max-width: 720px; margin: 0 auto; padding: 24px; }
+h1 { font-size: 22px; margin-bottom: 4px; }
+.subtitle { color: var(--dim); font-size: 13px; margin-bottom: 24px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 12px; }
+.card h2 { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 10px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.stat-label { font-size: 11px; color: var(--dim); text-transform: uppercase; }
+.stat-value { font-size: 18px; font-weight: 600; font-family: "SF Mono", "Fira Code", monospace; }
+.connection-status { display: flex; justify-content: space-between; align-items: center; }
+.btn-toggle { padding: 5px 12px; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; background: var(--accent); color: white; }
+.btn-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-toggle:hover:not(:disabled) { background: #818cf8; }
+.btn-toggle.running { background: rgba(239,68,68,0.15); color: var(--danger); border: 1px solid rgba(239,68,68,0.3); }
+.btn-toggle.running:hover:not(:disabled) { background: rgba(239,68,68,0.25); }
+.log { background: var(--bg); border-radius: 6px; padding: 8px 12px; font-family: "SF Mono", monospace;
+       font-size: 12px; color: var(--dim); max-height: 200px; overflow-y: auto; white-space: pre-wrap; }
+.loss-chart { height: 120px; background: var(--bg); border-radius: 6px; position: relative; overflow: hidden; }
+.loss-bar { position: absolute; bottom: 0; background: var(--accent); opacity: 0.6; min-width: 2px; }
+.config-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.config-row label { font-size: 12px; color: var(--dim); min-width: 100px; }
+.config-row input { flex: 1; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border);
+                    border-radius: 6px; color: var(--text); font-family: "SF Mono", monospace; font-size: 13px; }
+.config-row input:focus { outline: none; border-color: var(--accent); }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-dot.connected { background: var(--success); }
+.status-dot.disconnected { background: var(--danger); }
+.card-header { display: flex; justify-content: space-between; align-items: center; }
+.card-header h2 { margin-bottom: 0; }
+.btn-collapse { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--dim);
+               width: 24px; height: 24px; cursor: pointer; font-size: 14px; line-height: 1; }
+.btn-collapse:hover { border-color: var(--accent); color: var(--text); }
+.settings-panel.hidden { display: none; }
+.settings-panel { margin-top: 10px; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; }
+.settings-grid .config-row { display: flex; gap: 6px; align-items: center; }
+.settings-grid .config-row label { font-size: 11px; color: var(--dim); min-width: 80px; }
+.settings-grid .config-row input { flex: 1; padding: 4px 8px; background: var(--bg); border: 1px solid var(--border);
+                                   border-radius: 4px; color: var(--text); font-family: "SF Mono", monospace; font-size: 12px; width: 80px; }
+.settings-grid .config-row input:focus { outline: none; border-color: var(--accent); }
+.settings-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+.settings-hint { font-size: 11px; color: var(--dim); }
+.btn-save { padding: 4px 12px; border: 1px solid var(--accent); border-radius: 4px; background: none;
+            color: var(--accent); font-size: 12px; cursor: pointer; }
+.btn-save:hover { background: rgba(99, 102, 241, 0.1); }
+@media (max-width: 500px) {
+  .grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .settings-grid { grid-template-columns: 1fr; }
+  .controls { flex-direction: column; }
+}

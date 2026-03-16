@@ -1,0 +1,23 @@
+[package]
+name = "distrain-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Distrain desktop app — manage GPU node training"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+distrain-node = { path = "../../cli" }
+distrain-shared = { path = "../../../core/shared" }
+distrain-model = { path = "../../../core/model" }
+burn = { workspace = true, features = ["autodiff"] }
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+shellexpand = "3"

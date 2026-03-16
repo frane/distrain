@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegui/nicegui/main/tauri-conf-schema.json",
+  "productName": "Distrain Node",
+  "version": "0.1.0",
+  "identifier": "com.distrain.node",
+  "build": {
+    "frontendDist": "../frontend"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Distrain Node",
+        "width": 900,
+        "height": 680,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "tooltip": "Distrain Node"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ]
+  }
+}

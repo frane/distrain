@@ -1,0 +1,32 @@
+# Build artifacts
+target/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Node configs (contain credentials)
+node.toml
+node-remote.toml
+*.toml
+!Cargo.toml
+!pyproject.toml
+
+# Local data
+minio-local/
+data/
+dist/
+
+# IDE / tooling
+.claude/
+.playwright-cli/
+.DS_Store
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+*.a

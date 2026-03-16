@@ -1,0 +1,35 @@
+groups:
+  - name: distrain
+    rules:
+      - alert: AccumulatorStall
+        expr: changes(distrain_checkpoint_version[30m]) == 0 and distrain_active_nodes > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: No new checkpoint produced in 30 minutes
+          description: "Checkpoint version has not advanced despite {{ $value }} active nodes."
+
+      - alert: HighRejectionRate
+        expr: rate(distrain_delta_pushes_rejected[5m]) / rate(distrain_delta_pushes_total[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 50% of delta pushes are being rejected
+
+      - alert: AggregationFailures
+        expr: increase(distrain_aggregations_failed[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Aggregation failed
+          description: "{{ $value }} aggregation failures in the last 10 minutes."
+
+      - alert: NoActiveNodes
+        expr: distrain_active_nodes == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: No active nodes in the training cluster

@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "core/model",
+    "core/shared",
+    "coordinator",
+    "node/cli",
+    "node/desktop/src-tauri",
+    "node/browser/wasm",
+    "node/ffi",
+]
+exclude = [
+    "node/browser/wasm",  # requires wasm32 target, build with wasm-pack
+]
+default-members = [
+    "core/model",
+    "core/shared",
+    "coordinator",
+    "node/cli",
+    "node/ffi",
+]
+resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.7"
+aws-sdk-s3 = "1"
+aws-config = "1"
+burn = "0.20"
+burn-ndarray = "0.20"
+burn-wgpu = { version = "0.20", default-features = false }
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+safetensors = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", features = ["json"] }
+sha2 = "0.10"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+toml = "0.8"
+zstd = "0.13"

@@ -1,0 +1,18 @@
+[package]
+name = "distrain-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C FFI bindings for Distrain training engine — used by Android (JNI) and iOS (Swift)"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+distrain-shared = { path = "../../core/shared" }
+distrain-model = { path = "../../core/model", features = ["zstd-compression"] }
+burn = { workspace = true, features = ["autodiff"] }
+burn-wgpu = { workspace = true, default-features = false, features = ["std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

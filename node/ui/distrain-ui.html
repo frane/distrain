@@ -1,0 +1,71 @@
+<!-- Distrain Node — Shared UI Layout
+     Include this in platform-specific index.html files.
+     Each platform provides its own adapter script. -->
+
+<div class="app">
+  <h1>Distrain Node</h1>
+  <p class="subtitle" id="subtitle">Distributed training via Burn</p>
+
+  <div class="card">
+    <div class="config-row">
+      <label>Coordinator</label>
+      <input type="text" id="coordinator-url" value="http://localhost:8000">
+    </div>
+    <div class="connection-status">
+      <div style="font-size: 12px; color: var(--dim);">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">Not connected</span>
+      </div>
+      <button class="btn-toggle" id="btn-toggle" onclick="distrainToggle()">Start Training</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Training</h2>
+    <div class="grid-4">
+      <div><div class="stat-label">Step</div><div class="stat-value" id="step">0</div></div>
+      <div><div class="stat-label">Loss</div><div class="stat-value" id="loss">--</div></div>
+      <div><div class="stat-label">Tokens</div><div class="stat-value" id="tokens">0</div></div>
+      <div><div class="stat-label">Tok/s</div><div class="stat-value" id="tps">--</div></div>
+    </div>
+    <div class="grid-4" style="margin-top: 8px;">
+      <div><div class="stat-label">Round</div><div class="stat-value" id="round">0</div></div>
+      <div><div class="stat-label">Checkpoint</div><div class="stat-value" id="ckpt-version">0</div></div>
+      <div><div class="stat-label">Pushes</div><div class="stat-value" id="push-count">0</div></div>
+      <div><div class="stat-label">Time</div><div class="stat-value" id="elapsed">--</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Loss History</h2>
+    <div class="loss-chart" id="loss-chart"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Settings</h2>
+      <button class="btn-collapse" id="settings-toggle" onclick="distrainToggleSettings()">+</button>
+    </div>
+    <div id="settings-panel" class="settings-panel hidden">
+      <div class="settings-grid">
+        <div class="config-row"><label>LR max</label><input type="text" id="cfg-lr-max" value="3e-4"></div>
+        <div class="config-row"><label>LR min</label><input type="text" id="cfg-lr-min" value="1e-6"></div>
+        <div class="config-row"><label>Warmup %</label><input type="number" id="cfg-warmup" value="20" min="0" max="100"></div>
+        <div class="config-row"><label>Grad clip</label><input type="text" id="cfg-grad-clip" value="1.0"></div>
+        <div class="config-row"><label>Weight decay</label><input type="text" id="cfg-weight-decay" value="0.1"></div>
+        <div class="config-row"><label>Batch size</label><input type="number" id="cfg-batch-size" value="4" min="1"></div>
+        <div class="config-row"><label>Seq length</label><input type="number" id="cfg-seq-len" value="512" min="32"></div>
+        <div class="config-row"><label>Shards %</label><input type="number" id="cfg-shards" value="20" min="1" max="100"></div>
+      </div>
+      <div class="settings-actions">
+        <span class="settings-hint" id="settings-hint">Defaults from coordinator</span>
+        <button class="btn-save" onclick="distrainSaveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Logs</h2>
+    <div class="log" id="log">Ready. Click "Start Training" to begin.</div>
+  </div>
+</div>

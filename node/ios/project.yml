@@ -1,0 +1,45 @@
+name: DistrainNode
+options:
+  bundleIdPrefix: com.distrain
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "2"  # iPad only
+
+targets:
+  DistrainNode:
+    type: application
+    platform: iOS
+    sources:
+      - path: DistrainNode
+        type: group
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.distrain.node
+        INFOPLIST_FILE: DistrainNode/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: DistrainNode/distrain.h
+        CODE_SIGN_STYLE: Automatic
+        LIBRARY_SEARCH_PATHS:
+          - "$(PROJECT_DIR)/libs"
+        OTHER_LDFLAGS:
+          - "-lresolv"
+          - "-ldistrain_ffi-ios"
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: MetalPerformanceShaders.framework
+      - sdk: QuartzCore.framework
+    preBuildScripts:
+      - name: "Build Rust FFI"
+        script: |
+          if [ ! -f "${PROJECT_DIR}/libs/libdistrain_ffi-ios.a" ]; then
+            echo "warning: libdistrain_ffi-ios.a not found — run 'just build-ios' first"
+          fi
+        basedOnDependencyAnalysis: false
+    postCompileScripts: []
+    scheme:
+      testTargets: []
+      gatherCoverageData: false

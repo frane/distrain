@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Distrain — Browser Training</title>
+  <link rel="stylesheet" href="distrain-ui.css">
+</head>
+<body>
+  <div id="loading" style="text-align:center; padding:40px; color:#71717a;">Loading WASM module...</div>
+  <div id="main" style="display:none"></div>
+
+  <script src="distrain-ui.js"></script>
+  <script type="module">
+    // --- Load shared UI layout ---
+    const resp = await fetch('distrain-ui.html');
+    document.getElementById('main').innerHTML = await resp.text();
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('main').style.display = 'block';
+
+    // --- Browser adapter state ---
+    let training = false;
+    let connected = false;
+    let pushCount = 0;
+    let currentRound = 0;
+    let totalTokens = 0;
+    let currentStep = 0;
+    let currentLoss = 0;
+    let currentCkptVersion = 0;
+    let nodeId = `browser-${Date.now()}`;
+    let worker = null;
+    let trainingStartTime = 0;
+    let lastTokensSnapshot = 0;
+    let lastTokensTime = 0;
+    let currentTps = 0;
+
+    // Browser defaults (lower than CLI/Desktop due to WASM memory limits).
+    // LR schedule and shards_fraction come from the coordinator at registration.
+    let BATCH_SIZE = 2;
+    let SEQ_LEN = 128;
+    let LR_MAX = 3e-4;
+    let LR_MIN = 1e-6;
+    let WARMUP_FRACTION = 0.2;
+    let SHARDS_FRACTION = 0.2;
+    let STEPS_PER_ROUND = 10;
+
+    function getCoordinatorUrl() { return document.getElementById('coordinator-url').value.replace(/\/$/, ''); }
+
+    // --- Deterministic shard assignment (port of core/model compute_shard_assignment) ---
+    function splitmix64(state) {
+      // JavaScript BigInt for 64-bit arithmetic
+      let s = BigInt(state) + 0x9e3779b97f4a7c15n;
+      s = s & 0xFFFFFFFFFFFFFFFFn;
+      let z = s;
+      z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & 0xFFFFFFFFFFFFFFFFn;
+      z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & 0xFFFFFFFFFFFFFFFFn;
+      z = z ^ (z >> 31n);
+      return Number(z & 0xFFFFFFFFFFFFFFFFn);
+    }
+
+    function computeShardAssignment(nodeId, checkpointVersion, totalShards, shardsPerNode) {
+      const count = Math.min(shardsPerNode, totalShards);
+      // Simple hash for seeds (FNV-1a-like)
+      function hash(str) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < str.length; i++) {
+          h ^= str.charCodeAt(i);
+          h = Math.imul(h, 0x01000193);
+        }
+        return h >>> 0;
+      }
+      const nodeSeed = hash(`${checkpointVersion}:${nodeId}`);
+      const globalSeed = hash(`${checkpointVersion}`);
+
+      // Global shuffle
+      const allShards = Array.from({length: totalShards}, (_, i) => i);
+      let rng = globalSeed;
+      for (let i = allShards.length - 1; i > 0; i--) {
+        rng = splitmix64(rng);
+        const j = Math.abs(rng) % (i + 1);
+        [allShards[i], allShards[j]] = [allShards[j], allShards[i]];
+      }
+
+      // Node-specific shuffle
+      rng = nodeSeed;
+      for (let i = allShards.length - 1; i > 0; i--) {
+        rng = splitmix64(rng);
+        const j = Math.abs(rng) % (i + 1);
+        [allShards[i], allShards[j]] = [allShards[j], allShards[i]];
+      }
+      return allShards.slice(0, count);
+    }
+
+    // --- Streaming download with progress ---
+    async function downloadWithProgress(url, label) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Download failed: ${resp.status} for ${label}`);
+
+      const contentLength = resp.headers.get('Content-Length');
+      if (!contentLength || !resp.body) {
+        return await resp.arrayBuffer();
+      }
+
+      const totalBytes = parseInt(contentLength, 10);
+      const reader = resp.body.getReader();
+      const chunks = [];
+      let received = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+      }
+
+      const result = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return result.buffer;
+    }
+
+    // --- Coordinator API helpers ---
+    async function registerWithCoordinator() {
+      try {
+        const resp = await fetch(`${getCoordinatorUrl()}/nodes/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gpu_model: 'browser-wasm', gpu_memory_gb: 0, bandwidth_mbps: 100 }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          nodeId = data.node_id || nodeId;
+          // Apply coordinator training params (keep browser-specific batch/seq defaults)
+          if (data.training_params) {
+            const p = data.training_params;
+            LR_MAX = p.lr_max ?? LR_MAX;
+            LR_MIN = p.lr_min ?? LR_MIN;
+            WARMUP_FRACTION = p.warmup_fraction ?? WARMUP_FRACTION;
+            SHARDS_FRACTION = p.shards_fraction ?? SHARDS_FRACTION;
+            log(`Training params: lr=${LR_MAX.toExponential(2)}→${LR_MIN.toExponential(2)}, warmup=${(WARMUP_FRACTION*100).toFixed(0)}%, shards=${(SHARDS_FRACTION*100).toFixed(0)}%`);
+          }
+          return true;
+        }
+      } catch (e) {
+        log(`Coordinator not reachable: ${e.message}`);
+      }
+      return false;
+    }
+
+    async function getCheckpointInfo() {
+      try {
+        const resp = await fetch(`${getCoordinatorUrl()}/checkpoint/latest`);
+        if (resp.ok) return await resp.json();
+      } catch (e) {}
+      return { version: 0 };
+    }
+
+    async function uploadDeltaAndPush(seqNum, version, deltaStr, loss, tokens, secs) {
+      const coordinator = getCoordinatorUrl();
+      const key = `deltas/v${version}/${nodeId}_${seqNum}.delta.json`;
+      try {
+        const put = await fetch(`${coordinator}/upload/${key}`, { method: 'PUT', body: deltaStr });
+        if (!put.ok) { log(`Upload failed: ${put.status}`); return false; }
+      } catch (e) { log(`Upload error: ${e.message}`); return false; }
+
+      try {
+        const resp = await fetch(`${coordinator}/delta`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            node_id: nodeId, seq_num: seqNum, checkpoint_version: version,
+            inner_steps: STEPS_PER_ROUND, delta_key: key, training_loss: loss || 0,
+            tokens_processed: tokens || 0, training_time_secs: secs || 1,
+          }),
+        });
+        if (resp.ok) { const d = await resp.json(); if (d.accepted) { pushCount++; return true; } }
+      } catch (e) { log(`Delta push error: ${e.message}`); }
+      return false;
+    }
+
+    // --- Web Worker management ---
+    function createWorker() {
+      const w = new Worker('worker.js', { type: 'module' });
+      w.onmessage = async (e) => {
+        const msg = e.data;
+        switch (msg.type) {
+          case 'ready':
+            log(`Worker initialized (preset: ${msg.preset}, max_seq_len: ${msg.maxSeqLen})`);
+            // Clamp SEQ_LEN to model's max_seq_len
+            if (msg.maxSeqLen && SEQ_LEN > msg.maxSeqLen) {
+              SEQ_LEN = msg.maxSeqLen;
+              log(`SEQ_LEN clamped to model max: ${SEQ_LEN}`);
+            }
+            break;
+          case 'log':
+            log(msg.msg);
+            break;
+          case 'status': {
+            currentStep = msg.step;
+            currentLoss = msg.loss;
+            totalTokens = msg.tokens;
+            currentRound = msg.round;
+            // Compute tok/s from delta
+            const now = performance.now() / 1000;
+            if (lastTokensTime > 0 && now > lastTokensTime) {
+              const dt = now - lastTokensTime;
+              const dTokens = totalTokens - lastTokensSnapshot;
+              if (dTokens > 0) currentTps = dTokens / dt;
+            }
+            lastTokensSnapshot = totalTokens;
+            lastTokensTime = now;
+            break;
+          }
+          case 'delta':
+            // Upload delta and push to coordinator
+            const ok = await uploadDeltaAndPush(
+              msg.round, currentCkptVersion, msg.data, msg.loss, msg.tokens, msg.secs);
+            log(`Round ${msg.round}: ${ok ? 'pushed' : 'local only'} (loss=${msg.loss.toFixed(4)}, ${msg.secs.toFixed(1)}s)`);
+            break;
+          case 'roundComplete': {
+            // Check if checkpoint advanced, reload if needed
+            const ckpt = await getCheckpointInfo();
+            if (ckpt.version > currentCkptVersion) {
+              log(`Checkpoint advanced to v${ckpt.version}, reloading...`);
+              try {
+                const key = `checkpoints/v${ckpt.version}/model.safetensors`;
+                const data = await downloadWithProgress(
+                  `${getCoordinatorUrl()}/download/${key}`, `checkpoint v${ckpt.version}`);
+                log(`Checkpoint v${ckpt.version} downloaded (${(data.byteLength / 1e6).toFixed(1)} MB). Loading...`);
+                w.postMessage({ type: 'loadCheckpoint', data }, [data]);
+                currentCkptVersion = ckpt.version;
+              } catch (e) {
+                log(`Failed to reload checkpoint: ${e.message}`);
+              }
+            }
+            break;
+          }
+          case 'error':
+            log(`Worker error: ${msg.msg}`);
+            break;
+          case 'stopped':
+            training = false;
+            log('Training stopped.');
+            break;
+        }
+      };
+      w.onerror = (err) => {
+        log(`Worker crashed: ${err.message}`);
+        training = false;
+      };
+      return w;
+    }
+
+    // --- Browser platform adapter ---
+    const browserAdapter = {
+      platformName: 'browser',
+      async startTraining() {
+        if (training) throw 'Already training';
+        training = true; pushCount = 0; currentRound = 0; totalTokens = 0;
+        trainingStartTime = performance.now() / 1000;
+        lastTokensSnapshot = 0; lastTokensTime = 0; currentTps = 0;
+
+        connected = await registerWithCoordinator();
+        if (!connected) { training = false; throw 'Cannot reach coordinator'; }
+        log(`Registered as ${nodeId}`);
+
+        // Detect model preset from v0 metadata
+        let preset = 'Tiny';
+        try {
+          const v0data = await downloadWithProgress(
+            `${getCoordinatorUrl()}/download/checkpoints/v0/metadata.json`, 'metadata');
+          const meta = JSON.parse(new TextDecoder().decode(v0data));
+          if (meta.preset) {
+            preset = meta.preset.charAt(0).toUpperCase() + meta.preset.slice(1);
+            if (preset === 'Micro-test') preset = 'MicroTest';
+          }
+        } catch (e) {
+          log(`Could not detect preset, defaulting to ${preset}`);
+        }
+
+        // Create web worker and initialize WASM
+        worker = createWorker();
+
+        // Wait for worker to be ready
+        await new Promise((resolve, reject) => {
+          const origHandler = worker.onmessage;
+          worker.onmessage = (e) => {
+            if (e.data.type === 'ready') {
+              worker.onmessage = origHandler;
+              resolve();
+            } else if (e.data.type === 'error') {
+              reject(new Error(e.data.msg));
+            }
+            // Also pass through to normal handler
+            origHandler(e);
+          };
+          worker.postMessage({ type: 'init', preset });
+        });
+
+        // Download and load real checkpoint
+        const ckpt = await getCheckpointInfo();
+        log(`Downloading checkpoint v${ckpt.version}...`);
+        const ckptData = await downloadWithProgress(
+          `${getCoordinatorUrl()}/download/${ckpt.checkpoint_key}`, `checkpoint v${ckpt.version}`);
+        log(`Loading checkpoint v${ckpt.version} (${(ckptData.byteLength / 1e6).toFixed(1)} MB)...`);
+        worker.postMessage({ type: 'loadCheckpoint', data: ckptData }, [ckptData]);
+        currentCkptVersion = ckpt.version;
+
+        // Wait for checkpoint to be loaded
+        await new Promise(resolve => {
+          const origHandler = worker.onmessage;
+          worker.onmessage = (e) => {
+            origHandler(e);
+            if (e.data.type === 'log' && e.data.msg.includes('Checkpoint loaded')) {
+              worker.onmessage = origHandler;
+              resolve();
+            }
+            if (e.data.type === 'error') {
+              worker.onmessage = origHandler;
+              resolve(); // don't block forever
+            }
+          };
+        });
+
+        // Download real training data shards (deterministic assignment per node)
+        log('Downloading data manifest...');
+        const manifestData = await downloadWithProgress(
+          `${getCoordinatorUrl()}/download/data/manifest.json`, 'manifest');
+        const manifest = JSON.parse(new TextDecoder().decode(manifestData));
+        const shardFiles = manifest.shards || [];
+        if (shardFiles.length === 0) { training = false; throw 'No data shards in manifest'; }
+
+        // Deterministic shard assignment — different nodes get different data
+        const shardsPerNode = Math.max(Math.min(Math.floor(shardFiles.length * SHARDS_FRACTION), shardFiles.length), 2);
+        const assignedIndices = computeShardAssignment(nodeId, ckpt.version, shardFiles.length, shardsPerNode);
+        log(`Shard assignment: ${assignedIndices.length} of ${shardFiles.length} shards`);
+
+        const shardBuffers = [];
+        for (let i = 0; i < assignedIndices.length; i++) {
+          const idx = assignedIndices[i];
+          const entry = shardFiles[idx];
+          const shardName = typeof entry === 'string' ? entry : entry.filename;
+          const buf = await downloadWithProgress(
+            `${getCoordinatorUrl()}/download/data/${shardName}`, shardName);
+          shardBuffers.push(buf);
+        }
+
+        // Transfer shard data to worker (zero-copy via transferable)
+        worker.postMessage({ type: 'loadShards', shards: shardBuffers }, shardBuffers);
+
+        // Start training loop in worker
+        worker.postMessage({
+          type: 'startTraining',
+          config: {
+            batchSize: BATCH_SIZE, seqLen: SEQ_LEN, stepsPerRound: STEPS_PER_ROUND,
+            lrMax: LR_MAX, lrMin: LR_MIN, warmupFraction: WARMUP_FRACTION,
+          },
+        });
+
+        return 'Training started (browser/WASM worker)';
+      },
+      async stopTraining() {
+        if (worker) worker.postMessage({ type: 'stop' });
+        training = false;
+        return 'Stopping...';
+      },
+      async getStatus() {
+        return { is_training: training, connected, node_id: nodeId, gpu_info: 'WebAssembly', h_mini: 10 };
+      },
+      async getStats() {
+        const elapsed = trainingStartTime > 0 ? (performance.now() / 1000) - trainingStartTime : 0;
+        return {
+          current_step: currentStep, total_steps: currentStep, current_loss: currentLoss,
+          tokens_processed: totalTokens, tokens_per_sec: currentTps,
+          elapsed_secs: training ? elapsed : 0,
+          checkpoint_version: currentCkptVersion, rounds_completed: currentRound,
+          delta_upload_size_bytes: 0, compression_ratio: 0,
+        };
+      },
+      async getLogs() { return []; },
+      async getTrainingParams() {
+        return {
+          lr_max: LR_MAX, lr_min: LR_MIN, warmup_fraction: WARMUP_FRACTION,
+          grad_clip_norm: 1.0, weight_decay: 0.1,
+          batch_size: BATCH_SIZE, seq_len: SEQ_LEN, shards_fraction: SHARDS_FRACTION,
+        };
+      },
+      async saveTrainingParams(p) {
+        LR_MAX = p.lr_max; LR_MIN = p.lr_min; WARMUP_FRACTION = p.warmup_fraction;
+        BATCH_SIZE = p.batch_size; SEQ_LEN = p.seq_len; SHARDS_FRACTION = p.shards_fraction;
+      },
+    };
+
+    // Init shared UI
+    window.distrainInit(browserAdapter);
+  </script>
+</body>
+</html>

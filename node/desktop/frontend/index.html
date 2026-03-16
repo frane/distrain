@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Distrain Node</title>
+  <link rel="stylesheet" href="distrain-ui.css">
+</head>
+<body>
+  <div id="main"></div>
+
+  <script src="distrain-ui.js"></script>
+  <script type="module">
+    // Load shared UI layout
+    const resp = await fetch('distrain-ui.html');
+    document.getElementById('main').innerHTML = await resp.text();
+
+    const { invoke } = window.__TAURI__.core;
+
+    // Desktop/Tauri platform adapter
+    const desktopAdapter = {
+      platformName: 'desktop',
+      async startTraining() { return await invoke('start_training'); },
+      async stopTraining() { return await invoke('stop_training'); },
+      async getStatus() { return await invoke('get_node_status'); },
+      async getStats() { return await invoke('get_training_stats'); },
+      async getLogs() { return await invoke('get_logs'); },
+      async getTrainingParams() { return await invoke('get_training_params'); },
+      async saveTrainingParams(params) { return await invoke('save_training_params', { params }); },
+    };
+
+    window.distrainInit(desktopAdapter);
+  </script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[package]
+name = "distrain-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Distrain training engine compiled to WebAssembly"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+distrain-model = { path = "../../../core/model", default-features = false }
+burn = { workspace = true, features = ["autodiff"] }
+burn-wgpu = { workspace = true, default-features = false, features = ["std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }

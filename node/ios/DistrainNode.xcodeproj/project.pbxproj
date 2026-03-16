@@ -1,0 +1,389 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 63;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1C5FE43A80DBA104BC7876B7 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A95E2FCB7C297509FC73E7BB /* ContentView.swift */; };
+		253EB25567F6ADCADE34FBA1 /* DistrainNodeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 600A369C52B7169164DC302C /* DistrainNodeApp.swift */; };
+		30C0E8E898B2A8A3E0AACEC2 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9F5F99CECA358182CF2CE312 /* Metal.framework */; };
+		39E984396A5F39F324791071 /* MetalPerformanceShaders.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7746A3E599E8980D8E3EE0DA /* MetalPerformanceShaders.framework */; };
+		3E7D9F3F3D4330DBBEBF318E /* DistrainBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CE7B81FF4DF3BAF971969F4 /* DistrainBridge.swift */; };
+		42506ECC0875C68A8D0A6B22 /* TrainingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAFD7DE8AED412DBF6B0B65D /* TrainingManager.swift */; };
+		50B8F6CD76B4E875DF0F1603 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B457D138F72A019680E66D43 /* QuartzCore.framework */; };
+		A247DC0C572F877069212194 /* LossChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D263B569668B9016246C39F /* LossChartView.swift */; };
+		BBF68347BDB9054B13C9E596 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 99EA57B568F87F4FF87163FD /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0CE7B81FF4DF3BAF971969F4 /* DistrainBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DistrainBridge.swift; sourceTree = "<group>"; };
+		0D263B569668B9016246C39F /* LossChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LossChartView.swift; sourceTree = "<group>"; };
+		213E15EADD0D4E53E1C04678 /* distrain.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = distrain.h; sourceTree = "<group>"; };
+		600A369C52B7169164DC302C /* DistrainNodeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DistrainNodeApp.swift; sourceTree = "<group>"; };
+		60F2948F4857F9F80FEE4755 /* DistrainNode.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DistrainNode.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6D268E841118B26C4DA8F1BD /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		7746A3E599E8980D8E3EE0DA /* MetalPerformanceShaders.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalPerformanceShaders.framework; path = System/Library/Frameworks/MetalPerformanceShaders.framework; sourceTree = SDKROOT; };
+		99EA57B568F87F4FF87163FD /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		9F5F99CECA358182CF2CE312 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		A95E2FCB7C297509FC73E7BB /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B457D138F72A019680E66D43 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		EAFD7DE8AED412DBF6B0B65D /* TrainingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrainingManager.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		00645B3DA8A9F4B0A99D9990 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				30C0E8E898B2A8A3E0AACEC2 /* Metal.framework in Frameworks */,
+				39E984396A5F39F324791071 /* MetalPerformanceShaders.framework in Frameworks */,
+				50B8F6CD76B4E875DF0F1603 /* QuartzCore.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		516818F46D2EC6BBDD96C6ED = {
+			isa = PBXGroup;
+			children = (
+				D234F0ACC0B8F741E80D9C16 /* DistrainNode */,
+				981838779E54A18BFD897EAF /* Frameworks */,
+				9C0E107D15FD0145E2DC1F2C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		981838779E54A18BFD897EAF /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				9F5F99CECA358182CF2CE312 /* Metal.framework */,
+				7746A3E599E8980D8E3EE0DA /* MetalPerformanceShaders.framework */,
+				B457D138F72A019680E66D43 /* QuartzCore.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		9C0E107D15FD0145E2DC1F2C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				60F2948F4857F9F80FEE4755 /* DistrainNode.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D234F0ACC0B8F741E80D9C16 /* DistrainNode */ = {
+			isa = PBXGroup;
+			children = (
+				99EA57B568F87F4FF87163FD /* Assets.xcassets */,
+				A95E2FCB7C297509FC73E7BB /* ContentView.swift */,
+				213E15EADD0D4E53E1C04678 /* distrain.h */,
+				0CE7B81FF4DF3BAF971969F4 /* DistrainBridge.swift */,
+				600A369C52B7169164DC302C /* DistrainNodeApp.swift */,
+				6D268E841118B26C4DA8F1BD /* Info.plist */,
+				0D263B569668B9016246C39F /* LossChartView.swift */,
+				EAFD7DE8AED412DBF6B0B65D /* TrainingManager.swift */,
+			);
+			path = DistrainNode;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A3F3C3ECA02FC4E38F990263 /* DistrainNode */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EECD8D575FF1FD50BD8D386D /* Build configuration list for PBXNativeTarget "DistrainNode" */;
+			buildPhases = (
+				DDE520BB7CFD7134311FC536 /* Build Rust FFI */,
+				683BAF6E16981654155BC5FA /* Sources */,
+				18D212565CC37811244F8CE6 /* Resources */,
+				00645B3DA8A9F4B0A99D9990 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DistrainNode;
+			packageProductDependencies = (
+			);
+			productName = DistrainNode;
+			productReference = 60F2948F4857F9F80FEE4755 /* DistrainNode.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		379250C0321419A710B4A7B4 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					A3F3C3ECA02FC4E38F990263 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 796E732C9710332ECC42425B /* Build configuration list for PBXProject "DistrainNode" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 516818F46D2EC6BBDD96C6ED;
+			minimizedProjectReferenceProxies = 1;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A3F3C3ECA02FC4E38F990263 /* DistrainNode */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		18D212565CC37811244F8CE6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BBF68347BDB9054B13C9E596 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		DDE520BB7CFD7134311FC536 /* Build Rust FFI */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust FFI";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ ! -f \"${PROJECT_DIR}/libs/libdistrain_ffi-ios.a\" ]; then\n  echo \"warning: libdistrain_ffi-ios.a not found — run 'just build-ios' first\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		683BAF6E16981654155BC5FA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1C5FE43A80DBA104BC7876B7 /* ContentView.swift in Sources */,
+				3E7D9F3F3D4330DBBEBF318E /* DistrainBridge.swift in Sources */,
+				253EB25567F6ADCADE34FBA1 /* DistrainNodeApp.swift in Sources */,
+				A247DC0C572F877069212194 /* LossChartView.swift in Sources */,
+				42506ECC0875C68A8D0A6B22 /* TrainingManager.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		188F641F86867630485594F6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6BDFL25PH9;
+				INFOPLIST_FILE = DistrainNode/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/libs";
+				OTHER_LDFLAGS = (
+					"-lresolv",
+					"-ldistrain_ffi-ios",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.distrain.node;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = DistrainNode/distrain.h;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		4ABAC78BC5DA99A95F9DBC0F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Release;
+		};
+		6F0E29EA30B401A59667DCB6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 6BDFL25PH9;
+				INFOPLIST_FILE = DistrainNode/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/libs";
+				OTHER_LDFLAGS = (
+					"-lresolv",
+					"-ldistrain_ffi-ios",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.distrain.node;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = DistrainNode/distrain.h;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C801D13F89F2B9EDE78388B5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		796E732C9710332ECC42425B /* Build configuration list for PBXProject "DistrainNode" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C801D13F89F2B9EDE78388B5 /* Debug */,
+				4ABAC78BC5DA99A95F9DBC0F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		EECD8D575FF1FD50BD8D386D /* Build configuration list for PBXNativeTarget "DistrainNode" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				188F641F86867630485594F6 /* Debug */,
+				6F0E29EA30B401A59667DCB6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 379250C0321419A710B4A7B4 /* Project object */;
+}
