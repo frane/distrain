@@ -16,7 +16,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use distrain_model::checkpoint::{load_safetensors_map, load_safetensors_shapes};
-use distrain_model::compression::{CompressionConfig, ErrorBuffer, compress_delta};
+use distrain_model::compression::{CompressionConfig, ErrorBuffer, compress_delta, CompressionStats};
 use distrain_model::config::{ModelConfig, ModelPreset};
 use distrain_model::model::{
     compute_lm_loss, precompute_rope_tables, DistrainTransformerModule,
@@ -52,6 +52,8 @@ pub struct TrainingResult {
     pub elapsed_secs: f64,
     pub steps_completed: u64,
     pub batch_size: usize,
+    #[serde(default)]
+    pub compression_stats: Option<CompressionStats>,
 }
 
 /// Why a GPU training attempt failed.
@@ -510,12 +512,19 @@ where
         top_k_fraction: adaptive_top_k(mean_loss),
         ..CompressionConfig::default()
     };
-    let compressed =
+    let (compressed, comp_stats) =
         compress_delta(&delta, &shapes, &compression_config, error_buffer)?;
     let eb_norm: f64 = error_buffer.buffer.values()
         .map(|v| v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>())
         .sum::<f64>().sqrt();
     info!("Error buffer norm: {eb_norm:.4} ({} params tracked)", error_buffer.buffer.len());
+    info!(
+        "Compression: dense_norm={:.4}, sparse_norm={:.4}, retention={:.2}%, kept={}/{}, raw={}MB, compressed={}MB, ratio={:.1}x",
+        comp_stats.dense_norm, comp_stats.sparse_norm, comp_stats.retention_ratio * 100.0,
+        comp_stats.num_params_kept, comp_stats.num_params_total,
+        comp_stats.raw_param_bytes / (1024 * 1024), comp_stats.compressed_bytes / (1024 * 1024),
+        comp_stats.raw_param_bytes as f64 / comp_stats.compressed_bytes.max(1) as f64,
+    );
 
     if let Some(parent) = output_delta_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -534,6 +543,7 @@ where
         elapsed_secs: elapsed,
         steps_completed: steps_done,
         batch_size,
+        compression_stats: Some(comp_stats),
     })
 }
 
@@ -1124,12 +1134,19 @@ where
         top_k_fraction: adaptive_top_k(mean_loss),
         ..CompressionConfig::default()
     };
-    let compressed =
+    let (compressed, comp_stats) =
         compress_delta(&delta, &shapes, &compression_config, &mut error_buffer)?;
     let eb_norm: f64 = error_buffer.buffer.values()
         .map(|v| v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>())
         .sum::<f64>().sqrt();
     info!("Error buffer norm: {eb_norm:.4} ({} params tracked)", error_buffer.buffer.len());
+    info!(
+        "Compression: dense_norm={:.4}, sparse_norm={:.4}, retention={:.2}%, kept={}/{}, raw={}MB, compressed={}MB, ratio={:.1}x",
+        comp_stats.dense_norm, comp_stats.sparse_norm, comp_stats.retention_ratio * 100.0,
+        comp_stats.num_params_kept, comp_stats.num_params_total,
+        comp_stats.raw_param_bytes / (1024 * 1024), comp_stats.compressed_bytes / (1024 * 1024),
+        comp_stats.raw_param_bytes as f64 / comp_stats.compressed_bytes.max(1) as f64,
+    );
 
     if let Some(parent) = output_delta_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1148,6 +1165,7 @@ where
         steps_completed: steps_done,
         elapsed_secs: elapsed,
         batch_size,
+        compression_stats: Some(comp_stats),
     }, error_buffer))
 }
 

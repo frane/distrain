@@ -168,6 +168,10 @@ pub async fn run_aggregation(
     let mut delta_weight_pairs: Vec<(HashMap<String, Vec<f32>>, f64)> = Vec::new();
     let mut accepted = 0usize;
     let mut rejected = 0usize;
+    let mut per_delta_norms: Vec<f64> = Vec::new();
+    let mut staleness_counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let mut loss_sum: f64 = 0.0;
+    let mut tokens_sum: u64 = 0;
 
     for contrib in &acc.contributions {
         // Download delta bytes
@@ -208,12 +212,17 @@ pub async fn run_aggregation(
             .map(|v| v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>())
             .sum();
         let dnorm = dnorm_sq.sqrt();
+        let staleness = acc.checkpoint_version.saturating_sub(contrib.checkpoint_version);
         info!(
             "  delta from {} (v{}): norm={dnorm:.4}, weight={:.4}, steps={}, staleness={}",
             &contrib.node_id.0[..12], contrib.checkpoint_version,
-            contrib.weight, contrib.inner_steps,
-            acc.checkpoint_version.saturating_sub(contrib.checkpoint_version),
+            contrib.weight, contrib.inner_steps, staleness,
         );
+
+        per_delta_norms.push(dnorm);
+        *staleness_counts.entry(staleness).or_insert(0) += 1usize;
+        loss_sum += contrib.training_loss;
+        tokens_sum += contrib.inner_steps * 4 * 512; // batch_size * seq_len approximation
 
         delta_weight_pairs.push((delta, contrib.weight));
         accepted += 1;
@@ -294,6 +303,14 @@ pub async fn run_aggregation(
             outer_delta_norm: delta_norm,
             aggregation_time_secs: elapsed,
             outer_lr,
+            avg_loss: if accepted > 0 { loss_sum / accepted as f64 } else { 0.0 },
+            total_tokens: tokens_sum,
+            staleness_histogram: {
+                let mut h: Vec<(u64, usize)> = staleness_counts.into_iter().collect();
+                h.sort_by_key(|(s, _)| *s);
+                h
+            },
+            per_delta_norms,
         },
     )
     .await;

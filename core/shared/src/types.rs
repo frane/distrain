@@ -46,6 +46,15 @@ pub struct DeltaPush {
     pub training_loss: f64,
     pub tokens_processed: u64,
     pub training_time_secs: f64,
+    /// Compressed delta size in bytes (for paper metrics).
+    #[serde(default)]
+    pub compressed_bytes: Option<u64>,
+    /// L2 norm of dense delta before top-k sparsification.
+    #[serde(default)]
+    pub dense_norm: Option<f64>,
+    /// L2 norm of sparse delta after top-k sparsification.
+    #[serde(default)]
+    pub sparse_norm: Option<f64>,
 }
 
 /// Response to delta push.

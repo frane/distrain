@@ -21,6 +21,14 @@ pub struct DeltaAcceptedEntry {
     pub training_loss: f64,
     pub weight: f64,
     pub staleness: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_processed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compressed_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dense_norm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sparse_norm: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +41,11 @@ pub struct CheckpointProducedEntry {
     pub outer_delta_norm: f64,
     pub aggregation_time_secs: f64,
     pub outer_lr: f64,
+    pub avg_loss: f64,
+    pub total_tokens: u64,
+    /// (staleness, count) pairs
+    pub staleness_histogram: Vec<(u64, usize)>,
+    pub per_delta_norms: Vec<f64>,
 }
 
 pub async fn append_stats_entry<T: Serialize>(storage: &Storage, entry: &T) {

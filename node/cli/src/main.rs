@@ -649,6 +649,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             training_loss: result.final_loss,
             tokens_processed: result.tokens_processed,
             training_time_secs: result.elapsed_secs,
+            compressed_bytes: result.compression_stats.as_ref().map(|s| s.compressed_bytes),
+            dense_norm: result.compression_stats.as_ref().map(|s| s.dense_norm),
+            sparse_norm: result.compression_stats.as_ref().map(|s| s.sparse_norm),
         };
 
         let mut push_ok = false;
@@ -678,6 +681,44 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         }
         if !push_ok {
             warn!("Failed to push delta after 5 attempts, continuing to next round");
+        }
+
+        // Append per-round metrics to local JSONL (best-effort, for paper analysis)
+        {
+            use tokio::io::AsyncWriteExt;
+            let metrics_path = cache_dir.join("node_metrics.jsonl");
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let entry = serde_json::json!({
+                "timestamp": timestamp,
+                "node_id": &node_id,
+                "seq": seq_num,
+                "version": version,
+                "steps": result.steps_completed,
+                "loss": result.final_loss,
+                "tokens": result.tokens_processed,
+                "secs": result.elapsed_secs,
+                "h_mini": h_mini,
+                "batch_size": result.batch_size,
+                "compressed_bytes": result.compression_stats.as_ref().map(|s| s.compressed_bytes),
+                "raw_bytes": result.compression_stats.as_ref().map(|s| s.raw_param_bytes),
+                "retention": result.compression_stats.as_ref().map(|s| s.retention_ratio),
+                "top_k": result.compression_stats.as_ref().map(|s| s.top_k_fraction),
+                "dense_norm": result.compression_stats.as_ref().map(|s| s.dense_norm),
+                "sparse_norm": result.compression_stats.as_ref().map(|s| s.sparse_norm),
+            });
+            if let Ok(line) = serde_json::to_string(&entry) {
+                if let Ok(mut f) = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&metrics_path)
+                    .await
+                {
+                    let _ = f.write_all(format!("{line}\n").as_bytes()).await;
+                }
+            }
         }
 
         // Cleanup delta file

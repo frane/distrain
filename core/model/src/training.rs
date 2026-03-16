@@ -83,7 +83,7 @@ pub fn train_and_compress(
     shapes: &HashMap<String, Vec<usize>>,
     compression_config: &CompressionConfig,
     error_buffer: &mut ErrorBuffer,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(Vec<u8>, crate::compression::CompressionStats)> {
     let delta = compute_outer_delta(start_params, current_params);
     compress_delta(&delta, shapes, compression_config, error_buffer)
 }

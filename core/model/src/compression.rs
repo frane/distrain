@@ -11,6 +11,22 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Metrics from the compression pipeline, for paper instrumentation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompressionStats {
+    /// L2 norm of delta after error feedback, before top-k sparsification.
+    pub dense_norm: f64,
+    /// L2 norm of delta after top-k sparsification.
+    pub sparse_norm: f64,
+    /// sparse_norm / dense_norm. Measures how much gradient signal survives top-k.
+    pub retention_ratio: f64,
+    pub top_k_fraction: f32,
+    pub num_params_total: usize,
+    pub num_params_kept: usize,
+    pub compressed_bytes: u64,
+    pub raw_param_bytes: u64,
+}
+
 /// Compression settings. Matches Python `CompressionConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompressionConfig {
@@ -224,19 +240,92 @@ fn reconstruct_dense(sparse_delta: &SparseDelta) -> Result<HashMap<String, Vec<f
     Ok(result)
 }
 
-/// Full compression pipeline: error feedback → top-k → INT8 → zstd → bytes.
+/// L2 norm of a delta (across all tensors).
+fn delta_l2_norm(delta: &HashMap<String, Vec<f32>>) -> f64 {
+    delta
+        .values()
+        .flat_map(|v| v.iter())
+        .map(|x| (*x as f64) * (*x as f64))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Total element count across all tensors.
+fn delta_param_count(delta: &HashMap<String, Vec<f32>>) -> usize {
+    delta.values().map(|v| v.len()).sum()
+}
+
+/// Non-zero element count across all tensors.
+fn delta_nonzero_count(delta: &HashMap<String, Vec<f32>>) -> usize {
+    delta
+        .values()
+        .flat_map(|v| v.iter())
+        .filter(|x| **x != 0.0)
+        .count()
+}
+
+/// Full compression pipeline: error feedback -> top-k -> INT8 -> zstd -> bytes.
+/// Returns compressed bytes and instrumentation stats.
 #[cfg(feature = "zstd-compression")]
 pub fn compress_delta(
     delta: &HashMap<String, Vec<f32>>,
     shapes: &HashMap<String, Vec<usize>>,
     config: &CompressionConfig,
     error_buffer: &mut ErrorBuffer,
-) -> Result<Vec<u8>> {
-    let sparse_delta = build_sparse_delta(delta, shapes, config, error_buffer);
+) -> Result<(Vec<u8>, CompressionStats)> {
+    // Step 1: Error feedback
+    let delta_with_error = error_buffer.apply(delta);
+    let dense_norm = delta_l2_norm(&delta_with_error);
+    let num_params_total = delta_param_count(&delta_with_error);
+    let raw_param_bytes = (num_params_total * 4) as u64; // f32 = 4 bytes
+
+    // Step 2: Top-k sparsification
+    let (sparse, indices, values) = sparsify_topk(&delta_with_error, config.top_k_fraction);
+    error_buffer.update(&delta_with_error, &sparse);
+    let sparse_norm = delta_l2_norm(&sparse);
+    let num_params_kept = delta_nonzero_count(&sparse);
+
+    // Step 3: Optional INT8 quantization
+    let (final_values, scales) = if config.quantize_int8 {
+        let (q, s) = quantize_values_int8(&values);
+        let deq = dequantize_values_int8(&q, &s);
+        (deq, Some(s))
+    } else {
+        (values, None)
+    };
+
+    let sparse_delta = SparseDelta {
+        indices,
+        values: final_values,
+        shapes: shapes.clone(),
+        scales: scales.map(|s| s.into_iter().collect()),
+        config: config.clone(),
+    };
+
+    // Step 4: Serialize + zstd
     let json_bytes = sparse_delta_to_json(&sparse_delta)?;
     let compressed = zstd::encode_all(json_bytes.as_slice(), config.zstd_level)
         .context("zstd compression failed")?;
-    Ok(compressed)
+    let compressed_bytes = compressed.len() as u64;
+
+    let retention_ratio = if dense_norm > 0.0 {
+        sparse_norm / dense_norm
+    } else {
+        0.0
+    };
+
+    let stats = CompressionStats {
+        dense_norm,
+        sparse_norm,
+        retention_ratio,
+        top_k_fraction: config.top_k_fraction,
+        num_params_total,
+        num_params_kept,
+        compressed_bytes,
+        raw_param_bytes,
+    };
+
+    Ok((compressed, stats))
 }
 
 /// Validate a delta for NaN, Inf, and extreme magnitudes.

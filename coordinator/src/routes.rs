@@ -187,6 +187,10 @@ async fn push_delta(
             training_loss: push.training_loss,
             weight,
             staleness,
+            tokens_processed: Some(push.tokens_processed),
+            compressed_bytes: push.compressed_bytes,
+            dense_norm: push.dense_norm,
+            sparse_norm: push.sparse_norm,
         };
         tokio::spawn(async move {
             crate::stats::append_stats_entry(&stats_storage, &stats_entry).await;
