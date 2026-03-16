@@ -76,9 +76,12 @@ pub struct NodeConfig {
     pub seq_len: usize,
     #[serde(default)]
     pub training_params: Option<TrainingParams>,
-    /// Maximum fraction of available RAM to use (0.0–1.0). Default 0.80.
+    /// Maximum fraction of available RAM to use (0.0-1.0). Default 0.80.
     #[serde(default = "default_max_memory_fraction")]
     pub max_memory_fraction: f64,
+    /// Force batch_size without probing. Skips GPU subprocess calibration entirely.
+    #[serde(default)]
+    pub force_batch_size: Option<usize>,
     /// Force CPU backend (set via CLI --cpu flag, not from config file)
     #[serde(skip)]
     pub force_cpu: bool,
@@ -112,6 +115,7 @@ impl Default for NodeConfig {
             seq_len: 512,
             training_params: None,
             max_memory_fraction: default_max_memory_fraction(),
+            force_batch_size: None,
             force_cpu: false,
         }
     }

@@ -649,9 +649,10 @@ pub async fn calibrate_batch_size(
             continue;
         };
 
-        // 120s timeout: first-ever Metal shader compilation for 1B model takes 30-60s
+        // 180s timeout: first-ever Metal shader compilation for 1B model takes 30-60s,
+        // plus autotuning and the actual forward+backward pass
         match tokio::time::timeout(
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(180),
             child.wait_with_output(),
         ).await {
             Ok(Ok(output)) if output.status.success() => {

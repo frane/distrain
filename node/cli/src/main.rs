@@ -386,15 +386,20 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             }
 
             // Calibrate batch_size + benchmark via subprocess (GPU) or memory estimate (CPU)
-            if use_gpu {
+            if let Some(forced_bs) = config.force_batch_size {
+                batch_size = forced_bs;
+                grad_accum_steps = effective_batch_size / forced_bs;
+                batch_calibrated = true;
+                h_mini = min_h; // will be refined from first round timing
+                info!("Forced batch_size={forced_bs} (skipping calibration), grad_accum={grad_accum_steps}");
+            } else if use_gpu {
                 info!("Calibrating GPU batch_size and timing (subprocess)...");
                 let (cal_bs, cal_accum, cal_sps) = trainer::calibrate_batch_size(
                     &ckpt_path, config.seq_len, true, effective_batch_size,
                 ).await;
 
                 if cal_bs == 0 {
-                    // All GPU batch sizes failed — fall back to CPU
-                    warn!("GPU batch_size calibration failed — falling back to CPU");
+                    warn!("GPU batch_size calibration failed, falling back to CPU");
                     use_gpu = false;
                 } else {
                     batch_size = cal_bs;
@@ -403,15 +408,15 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     if let Some(sps) = cal_sps {
                         gpu_secs_per_step = Some(sps);
                         h_mini = ((target_interval / sps) as u64).clamp(min_h, max_h);
-                        info!("GPU calibrated: batch_size={batch_size}, grad_accum={grad_accum_steps}, {sps:.3}s/step → H_mini={h_mini}");
+                        info!("GPU calibrated: batch_size={batch_size}, grad_accum={grad_accum_steps}, {sps:.3}s/step, H_mini={h_mini}");
                     }
                 }
             }
 
-            if !use_gpu {
+            if !use_gpu && config.force_batch_size.is_none() {
                 config.force_cpu = true;
                 h_mini = min_h;
-                info!("Using CPU — starting with H_mini = {h_mini} (will refine from first round timing)");
+                info!("Using CPU, starting with H_mini = {h_mini} (will refine from first round timing)");
             }
 
             // CPU batch_size calibration (memory estimate)
