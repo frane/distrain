@@ -47,8 +47,8 @@ cargo build --release -p distrain-coordinator -p distrain-node
 # Start MinIO
 docker compose -f docker/docker-compose.yml up -d minio
 
-# Prepare data (needs Python for HuggingFace downloads)
-pip install -e ".[data]"
+# Prepare training data (needs Python + HuggingFace libraries)
+pip install datasets tokenizers numpy
 python scripts/prepare_data.py fineweb-edu-10bt --output-dir data/fineweb --upload
 
 # Bootstrap a model
