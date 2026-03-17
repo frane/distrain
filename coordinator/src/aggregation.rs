@@ -332,11 +332,13 @@ pub async fn run_aggregation(
     let mut coord_state = crate::state::load_coordinator_state(storage).await;
     let node_ids: Vec<String> = acc.contributions.iter().map(|c| c.node_id.0.clone()).collect();
     coord_state.recent_contributors.push((new_version, node_ids));
-    if coord_state.recent_contributors.len() > 10 {
-        coord_state.recent_contributors.drain(..coord_state.recent_contributors.len() - 10);
+    if coord_state.recent_contributors.len() > 5 {
+        coord_state.recent_contributors.drain(..coord_state.recent_contributors.len() - 5);
     }
+    // Count active nodes from last 3 checkpoints only (avoids ghost inflation from old entries)
+    let recent_window = coord_state.recent_contributors.len().saturating_sub(3);
     let mut all_nodes: HashSet<&str> = HashSet::new();
-    for (_, nodes) in &coord_state.recent_contributors {
+    for (_, nodes) in &coord_state.recent_contributors[recent_window..] {
         for n in nodes {
             all_nodes.insert(n);
         }

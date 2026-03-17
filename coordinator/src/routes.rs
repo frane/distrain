@@ -220,9 +220,15 @@ async fn push_delta(
     );
 
     // Check if we should produce a checkpoint (with lock to prevent concurrent aggregations)
-    if accepted
-        && state::should_checkpoint(&acc, dynamic_min)
-        && !app.aggregation_in_progress.load(Ordering::SeqCst)
+    let should_ckpt = state::should_checkpoint(&acc, dynamic_min);
+    let agg_in_progress = app.aggregation_in_progress.load(Ordering::SeqCst);
+    if accepted {
+        info!(
+            "Checkpoint check: contributions={}, dynamic_min={}, should_checkpoint={}, agg_in_progress={}",
+            acc.contributions.len(), dynamic_min, should_ckpt, agg_in_progress,
+        );
+    }
+    if accepted && should_ckpt && !agg_in_progress
     {
         // Try to acquire the aggregation lock
         if app
