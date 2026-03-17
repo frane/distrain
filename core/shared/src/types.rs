@@ -126,6 +126,9 @@ pub struct TrainingStatus {
     pub accumulator_contributions: u64,
     pub latest_val_loss: Option<f64>,
     pub loss_history: Vec<(u64, f64)>,
+    /// node_id -> last heartbeat unix timestamp
+    #[serde(default)]
+    pub node_last_seen: Vec<(String, u64)>,
 }
 
 /// Canonical training hyperparameters distributed by the coordinator.
@@ -166,6 +169,18 @@ impl Default for TrainingParams {
             shards_fraction: 0.2,
         }
     }
+}
+
+/// Heartbeat request from node to coordinator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatRequest {
+    pub node_id: NodeId,
+}
+
+/// Heartbeat response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatResponse {
+    pub active_nodes: u64,
 }
 
 /// Node registration request body.

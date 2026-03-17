@@ -132,6 +132,9 @@ pub struct CoordinatorPersistentState {
     /// (checkpoint_version, vec of node_id strings) for last N checkpoints.
     #[serde(default)]
     pub recent_contributors: Vec<(u64, Vec<String>)>,
+    /// node_id -> last heartbeat unix timestamp
+    #[serde(default)]
+    pub heartbeats: std::collections::HashMap<String, u64>,
 }
 
 pub async fn load_coordinator_state(storage: &Storage) -> CoordinatorPersistentState {

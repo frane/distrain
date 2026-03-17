@@ -263,6 +263,12 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             memory_pressure_abort = false;
         }
 
+        // Heartbeat: tell coordinator we're alive (best-effort, don't block training)
+        match coordinator.heartbeat(&node_id).await {
+            Ok(resp) => info!("Heartbeat OK ({} active nodes)", resp.active_nodes),
+            Err(e) => warn!("Heartbeat failed (non-fatal): {e}"),
+        }
+
         // Get latest checkpoint version
         let ckpt_info = coordinator.get_latest_checkpoint().await?;
         let version = ckpt_info.version;

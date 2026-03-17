@@ -27,6 +27,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/download/*key", get(download_from_storage))
         .route("/checkpoint/latest", get(get_latest_checkpoint))
         .route("/status", get(get_status))
+        .route("/heartbeat", post(heartbeat))
         .route("/health", get(health))
         .route("/metrics", get(metrics))
 }
@@ -359,15 +360,15 @@ async fn get_status(State(app): State<Arc<AppState>>) -> impl IntoResponse {
 
     let coord_state = state::load_coordinator_state(&app.storage).await;
 
-    // Active nodes: use accumulator cycle if non-empty, else persistent state
-    let active_nodes = {
-        let mut active_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for c in &acc.contributions {
-            active_ids.insert(&c.node_id.0);
-        }
-        let cycle_active = active_ids.len() as u64;
-        if cycle_active > 0 { cycle_active } else { coord_state.active_nodes }
-    };
+    // Active nodes from heartbeat TTL (30 min)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ttl = 30 * 60;
+    let active_nodes = coord_state.heartbeats.values()
+        .filter(|ts| now.saturating_sub(**ts) < ttl)
+        .count() as u64;
 
     // Weighted average loss from current contributions
     let total_w: f64 = acc.contributions.iter().map(|c| c.weight).sum();
@@ -386,9 +387,44 @@ async fn get_status(State(app): State<Arc<AppState>>) -> impl IntoResponse {
         accumulator_contributions: acc.contributions.len() as u64,
         latest_val_loss,
         loss_history: Vec::new(),
+        node_last_seen: coord_state.heartbeats.iter()
+            .map(|(id, ts)| (id.clone(), *ts))
+            .collect(),
     };
 
     Json(status)
+}
+
+/// POST /heartbeat — node liveness signal.
+async fn heartbeat(
+    State(app): State<Arc<AppState>>,
+    Json(req): Json<HeartbeatRequest>,
+) -> impl IntoResponse {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Update heartbeat in persistent state
+    let mut coord_state = state::load_coordinator_state(&app.storage).await;
+    coord_state.heartbeats.insert(req.node_id.0.clone(), now);
+
+    // Expire nodes not seen in 30 minutes
+    let ttl = 30 * 60;
+    coord_state.heartbeats.retain(|_, ts| now.saturating_sub(*ts) < ttl);
+    coord_state.active_nodes = coord_state.heartbeats.len() as u64;
+
+    let active = coord_state.active_nodes;
+    if let Err(e) = app.storage
+        .put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state)
+        .await
+    {
+        warn!("Failed to save coordinator state: {e}");
+    }
+
+    METRICS.active_nodes.store(active, Ordering::Relaxed);
+
+    Json(HeartbeatResponse { active_nodes: active })
 }
 
 /// GET /health — health check.

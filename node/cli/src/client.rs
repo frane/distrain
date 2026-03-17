@@ -72,6 +72,23 @@ impl CoordinatorClient {
             .context("Failed to parse checkpoint info")
     }
 
+    /// Send heartbeat to coordinator.
+    pub async fn heartbeat(&self, node_id: &str) -> Result<HeartbeatResponse> {
+        let req = HeartbeatRequest {
+            node_id: NodeId(node_id.to_string()),
+        };
+        let resp = self
+            .http
+            .post(format!("{}/heartbeat", self.base_url))
+            .json(&req)
+            .send()
+            .await
+            .context("Failed to send heartbeat")?;
+        resp.json::<HeartbeatResponse>()
+            .await
+            .context("Failed to parse heartbeat response")
+    }
+
     /// Get training status.
     pub async fn get_status(&self) -> Result<TrainingStatus> {
         let resp = self
