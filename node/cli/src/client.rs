@@ -72,10 +72,21 @@ impl CoordinatorClient {
             .context("Failed to parse checkpoint info")
     }
 
-    /// Send heartbeat to coordinator.
-    pub async fn heartbeat(&self, node_id: &str) -> Result<HeartbeatResponse> {
+    /// Send heartbeat to coordinator with optional step progress.
+    pub async fn heartbeat(
+        &self,
+        node_id: &str,
+        step: Option<u64>,
+        total_steps: Option<u64>,
+        loss: Option<f64>,
+        checkpoint_version: Option<u64>,
+    ) -> Result<HeartbeatResponse> {
         let req = HeartbeatRequest {
             node_id: NodeId(node_id.to_string()),
+            step,
+            total_steps,
+            loss,
+            checkpoint_version,
         };
         let resp = self
             .http
@@ -86,6 +97,31 @@ impl CoordinatorClient {
             .context("Failed to send heartbeat")?;
         resp.json::<HeartbeatResponse>()
             .await
+            .context("Failed to parse heartbeat response")
+    }
+
+    /// Sync heartbeat for use inside blocking threads (progress callbacks).
+    pub fn heartbeat_sync(
+        &self,
+        node_id: &str,
+        step: Option<u64>,
+        total_steps: Option<u64>,
+        loss: Option<f64>,
+        checkpoint_version: Option<u64>,
+    ) -> Result<HeartbeatResponse> {
+        let req = HeartbeatRequest {
+            node_id: NodeId(node_id.to_string()),
+            step,
+            total_steps,
+            loss,
+            checkpoint_version,
+        };
+        let resp = reqwest::blocking::Client::new()
+            .post(format!("{}/heartbeat", self.base_url))
+            .json(&req)
+            .send()
+            .context("Failed to send heartbeat")?;
+        resp.json::<HeartbeatResponse>()
             .context("Failed to parse heartbeat response")
     }
 

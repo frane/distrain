@@ -175,12 +175,25 @@ impl Default for TrainingParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatRequest {
     pub node_id: NodeId,
+    #[serde(default)]
+    pub step: Option<u64>,
+    #[serde(default)]
+    pub total_steps: Option<u64>,
+    #[serde(default)]
+    pub loss: Option<f64>,
+    #[serde(default)]
+    pub checkpoint_version: Option<u64>,
 }
 
 /// Heartbeat response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatResponse {
     pub active_nodes: u64,
+    /// If true, node should abort current round and pull new checkpoint.
+    #[serde(default)]
+    pub should_abort: bool,
+    #[serde(default)]
+    pub latest_version: Option<u64>,
 }
 
 /// Node registration request body.

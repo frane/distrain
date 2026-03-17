@@ -395,7 +395,7 @@ async fn get_status(State(app): State<Arc<AppState>>) -> impl IntoResponse {
     Json(status)
 }
 
-/// POST /heartbeat — node liveness signal.
+/// POST /heartbeat — node liveness signal with step progress.
 async fn heartbeat(
     State(app): State<Arc<AppState>>,
     Json(req): Json<HeartbeatRequest>,
@@ -405,12 +405,11 @@ async fn heartbeat(
         .unwrap_or_default()
         .as_secs();
 
-    // Update heartbeat in persistent state
     let mut coord_state = state::load_coordinator_state(&app.storage).await;
     coord_state.heartbeats.insert(req.node_id.0.clone(), now);
 
-    // Expire nodes not seen in 30 minutes
-    let ttl = 30 * 60;
+    // Expire nodes not seen in 10 minutes (tighter TTL since heartbeats are per-step now)
+    let ttl = 10 * 60;
     coord_state.heartbeats.retain(|_, ts| now.saturating_sub(*ts) < ttl);
     coord_state.active_nodes = coord_state.heartbeats.len() as u64;
 
@@ -424,7 +423,23 @@ async fn heartbeat(
 
     METRICS.active_nodes.store(active, Ordering::Relaxed);
 
-    Json(HeartbeatResponse { active_nodes: active })
+    // Check if node should abort: if checkpoint advanced beyond what it's training on
+    let acc = state::load_accumulator(&app.storage).await.unwrap_or(AccumulatorState {
+        checkpoint_version: 0, contributions: Vec::new(), version: 0,
+    });
+    let current_version = acc.checkpoint_version;
+    let should_abort = if let Some(node_version) = req.checkpoint_version {
+        let staleness = current_version.saturating_sub(node_version);
+        staleness >= 3 // abort if 3+ versions behind
+    } else {
+        false
+    };
+
+    Json(HeartbeatResponse {
+        active_nodes: active,
+        should_abort,
+        latest_version: Some(current_version),
+    })
 }
 
 /// GET /health — health check.

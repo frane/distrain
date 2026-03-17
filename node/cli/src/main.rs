@@ -266,8 +266,8 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             memory_pressure_abort = false;
         }
 
-        // Heartbeat: tell coordinator we're alive (best-effort, don't block training)
-        match coordinator.heartbeat(&node_id).await {
+        // Heartbeat: tell coordinator we're alive (best-effort)
+        match coordinator.heartbeat(&node_id, None, None, None, None).await {
             Ok(resp) => info!("Heartbeat OK ({} active nodes)", resp.active_nodes),
             Err(e) => warn!("Heartbeat failed (non-fatal): {e}"),
         }
@@ -497,20 +497,47 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                 sps,
                 batch_size,
                 grad_accum_steps,
-                move |progress| {
-                    // Check memory pressure every 50 steps
-                    if progress.step > 0
-                        && progress.step % 50 == 0
-                        && resources::check_memory_pressure(max_mem_fraction)
-                    {
-                        warn!(
-                            "Memory pressure critical at step {}/{} — aborting round",
-                            progress.step, progress.total_steps,
-                        );
-                        mem_abort_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                        return true;
+                {
+                    let hb_url = config.coordinator_url.clone();
+                    let hb_node_id = node_id.clone();
+                    let hb_version = version;
+                    move |progress: trainer::StepProgress| {
+                        // Memory pressure check every 50 steps
+                        if progress.step > 0
+                            && progress.step % 50 == 0
+                            && resources::check_memory_pressure(max_mem_fraction)
+                        {
+                            warn!(
+                                "Memory pressure critical at step {}/{} — aborting round",
+                                progress.step, progress.total_steps,
+                            );
+                            mem_abort_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                            return true;
+                        }
+                        // Per-step heartbeat (sync, best-effort)
+                        let client = crate::client::CoordinatorClient::new(&hb_url);
+                        match client.heartbeat_sync(
+                            &hb_node_id,
+                            Some(progress.step),
+                            Some(progress.total_steps),
+                            Some(progress.loss),
+                            Some(hb_version),
+                        ) {
+                            Ok(resp) if resp.should_abort => {
+                                warn!(
+                                    "Coordinator says abort: checkpoint advanced to v{}",
+                                    resp.latest_version.unwrap_or(0),
+                                );
+                                return true;
+                            }
+                            Err(e) => {
+                                // Best-effort, don't abort on heartbeat failure
+                                tracing::debug!("Heartbeat failed: {e}");
+                            }
+                            _ => {}
+                        }
+                        false
                     }
-                    false
                 },
             )
             .await;
@@ -584,19 +611,45 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                 &mut error_buffer,
                 batch_size,
                 grad_accum_steps,
-                move |progress| {
-                    if progress.step > 0
-                        && progress.step % 50 == 0
-                        && resources::check_memory_pressure(max_mem_fraction)
-                    {
-                        warn!(
-                            "Memory pressure critical at step {}/{} — aborting round",
-                            progress.step, progress.total_steps,
-                        );
-                        mem_abort_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                        return true;
+                {
+                    let hb_url = config.coordinator_url.clone();
+                    let hb_node_id = node_id.clone();
+                    let hb_version = version;
+                    move |progress: trainer::StepProgress| {
+                        if progress.step > 0
+                            && progress.step % 50 == 0
+                            && resources::check_memory_pressure(max_mem_fraction)
+                        {
+                            warn!(
+                                "Memory pressure critical at step {}/{} — aborting round",
+                                progress.step, progress.total_steps,
+                            );
+                            mem_abort_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                            return true;
+                        }
+                        // Per-step heartbeat (sync, best-effort)
+                        let client = crate::client::CoordinatorClient::new(&hb_url);
+                        match client.heartbeat_sync(
+                            &hb_node_id,
+                            Some(progress.step),
+                            Some(progress.total_steps),
+                            Some(progress.loss),
+                            Some(hb_version),
+                        ) {
+                            Ok(resp) if resp.should_abort => {
+                                warn!(
+                                    "Coordinator says abort: checkpoint advanced to v{}",
+                                    resp.latest_version.unwrap_or(0),
+                                );
+                                return true;
+                            }
+                            Err(e) => {
+                                tracing::debug!("Heartbeat failed: {e}");
+                            }
+                            _ => {}
+                        }
+                        false
                     }
-                    false
                 },
             )
             .await;
