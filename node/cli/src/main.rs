@@ -249,6 +249,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     let mut batch_size = effective_batch_size;
     let mut grad_accum_steps: usize = 1;
     let mut batch_calibrated = false;
+    // Adaptive inner LR: node observes own loss stability and adjusts
+    let base_lr_max = params.lr_max;
+    let mut effective_lr_max = base_lr_max;
     // Track checkpoint version to clear error buffer on version change
     let mut last_trained_version: Option<u64> = None;
 
@@ -632,6 +635,29 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             );
             let _ = tokio::fs::remove_file(&delta_path).await;
             continue;
+        }
+
+        // Don't push if loss spike detected (delta would be harmful)
+        if result.loss_spiked {
+            warn!("Loss spike detected — skipping push (delta would be harmful)");
+            let _ = tokio::fs::remove_file(&delta_path).await;
+            continue;
+        }
+
+        // Adaptive inner LR: observe loss stability, adjust for next round
+        if result.loss_variance > 0.0 && result.final_loss > 0.0 {
+            let cv = result.loss_variance.sqrt() / result.final_loss;
+            if cv > 0.5 {
+                effective_lr_max = (effective_lr_max * 0.8).max(base_lr_max * 0.1);
+                info!("Inner LR reduced: cv={cv:.3}, new lr_max={effective_lr_max:.2e}");
+            } else if cv < 0.1 && effective_lr_max < base_lr_max {
+                effective_lr_max = (effective_lr_max * 1.1).min(base_lr_max);
+                info!("Inner LR restored: cv={cv:.3}, new lr_max={effective_lr_max:.2e}");
+            }
+            // Apply for next round
+            if let Some(ref mut tp) = config.training_params {
+                tp.lr_max = effective_lr_max;
+            }
         }
 
         // Upload delta to R2 (retry with exponential backoff)

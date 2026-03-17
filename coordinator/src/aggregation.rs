@@ -29,12 +29,17 @@ struct AggregationMetadata {
     outer_lr: f64,
 }
 
-/// Persisted state for dynamic outer LR scheduling.
+/// Persisted state for adaptive outer optimizer.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct OuterLrState {
-    /// Current EMA-smoothed outer_lr value.
     outer_lr: f64,
+    #[serde(default = "default_momentum")]
+    outer_momentum: f64,
+    #[serde(default)]
+    recent_norms: Vec<f64>,
 }
+
+fn default_momentum() -> f64 { 0.9 }
 
 /// Compute outer_lr from absolute loss, relative to ln(vocab_size).
 ///
@@ -46,23 +51,13 @@ struct OuterLrState {
 fn compute_loss_based_outer_lr(current_lr: f64, avg_loss: f64, ln_vocab: f64) -> (f64, f64, f64) {
     let ratio = avg_loss / ln_vocab;
 
-    let target_lr = if ratio > 5.0 {
-        0.30 // random init — rapid descent
-    } else if ratio > 2.0 {
-        0.20 // early learning
-    } else if ratio > 1.0 {
-        0.15 // crossing uniform-guessing floor
-    } else if ratio > 0.7 {
-        0.10 // early convergence
-    } else if ratio > 0.5 {
-        0.07 // refinement
-    } else if ratio > 0.3 {
-        0.05 // fine-tuning
-    } else {
-        0.03 // final convergence
-    };
+    // Continuous log-linear schedule (no cliff edges):
+    // ratio=50 (random init) -> 0.30, ratio=0.3 (converged) -> 0.03
+    // Smooth transition instead of discrete brackets.
+    let ln_ratio = if ratio > 0.01 { ratio.ln() } else { (-4.6f64) }; // floor at ln(0.01)
+    let target_lr = (0.053 * ln_ratio + 0.094).clamp(0.02, 0.30);
 
-    // EMA smooth to avoid jumps at threshold boundaries
+    // EMA smooth
     let new_lr = (current_lr * 0.7 + target_lr * 0.3).clamp(0.01, 0.35);
 
     (new_lr, target_lr, ratio)
@@ -105,9 +100,9 @@ pub async fn run_aggregation(
 
     // 1b. Compute dynamic outer LR from absolute loss relative to ln(vocab_size)
     let ln_vocab = (vocab_size as f64).ln();
-    let lr_state = match storage.get_json::<OuterLrState>(&paths::outer_lr_state_path()).await {
+    let mut lr_state = match storage.get_json::<OuterLrState>(&paths::outer_lr_state_path()).await {
         Ok(s) => s,
-        Err(_) => OuterLrState { outer_lr },
+        Err(_) => OuterLrState { outer_lr, outer_momentum, recent_norms: Vec::new() },
     };
 
     // Weighted average training loss from contributions
@@ -135,22 +130,24 @@ pub async fn run_aggregation(
         outer_lr
     };
 
-    // Persist smoothed LR
+    // Persist adaptive optimizer state (LR + momentum + norm history)
+    lr_state.outer_lr = outer_lr;
     if let Err(e) = storage
-        .put_json(&paths::outer_lr_state_path(), &OuterLrState { outer_lr })
+        .put_json(&paths::outer_lr_state_path(), &lr_state)
         .await
     {
         warn!("Failed to save outer LR state: {e}");
     }
 
     // 2. Load optimizer velocity state (may not exist for version 0)
-    let mut outer_opt = NesterovOuterOptimizer::new(outer_lr, outer_momentum);
+    // outer_opt is created later with adaptive momentum; just load velocity here
+    let mut velocity_state: Option<std::collections::HashMap<String, Vec<f32>>> = None;
     let vel_key = paths::optimizer_state_path(acc.checkpoint_version);
     match storage.get(&vel_key).await {
         Ok(vel_bytes) => {
             match load_safetensors_map_from_bytes(&vel_bytes) {
                 Ok(vel_state) => {
-                    outer_opt.load_state_dict(vel_state);
+                    velocity_state = Some(vel_state);
                     info!("Loaded optimizer velocity state");
                 }
                 Err(e) => warn!("Could not parse optimizer velocity: {e}"),
@@ -185,7 +182,7 @@ pub async fn run_aggregation(
         };
 
         // Decompress: try zstd first, fallback to raw JSON
-        let delta = match decompress_delta_bytes(&delta_bytes) {
+        let mut delta = match decompress_delta_bytes(&delta_bytes) {
             Ok(d) => d,
             Err(e) => {
                 warn!(
@@ -219,20 +216,27 @@ pub async fn run_aggregation(
             contrib.weight, contrib.inner_steps, staleness,
         );
 
-        // Norm rejection: reject outlier deltas (>10x running average)
+        // Delta norm clipping: scale down outliers to 3x running average (preserves direction)
+        let mut effective_dnorm = dnorm;
         if !per_delta_norms.is_empty() {
             let avg_norm: f64 = per_delta_norms.iter().sum::<f64>() / per_delta_norms.len() as f64;
-            if dnorm > avg_norm * 10.0 {
-                warn!(
-                    "Rejecting outlier delta from {} — norm {dnorm:.4} is >10x avg {avg_norm:.4}",
+            let max_norm = avg_norm * 3.0;
+            if dnorm > max_norm && dnorm > 0.0 {
+                let scale = max_norm / dnorm;
+                info!(
+                    "Clipping delta from {} — norm {dnorm:.4} > 3x avg {avg_norm:.4}, scaling by {scale:.4}",
                     &contrib.node_id.0[..12],
                 );
-                rejected += 1;
-                continue;
+                for v in delta.values_mut() {
+                    for x in v.iter_mut() {
+                        *x *= scale as f32;
+                    }
+                }
+                effective_dnorm = max_norm;
             }
         }
 
-        per_delta_norms.push(dnorm);
+        per_delta_norms.push(effective_dnorm);
         *staleness_counts.entry(staleness).or_insert(0) += 1usize;
         loss_sum += contrib.training_loss;
         tokens_sum += contrib.inner_steps * 4 * 512; // batch_size * seq_len approximation
@@ -258,11 +262,35 @@ pub async fn run_aggregation(
         .sum();
     let delta_norm = delta_norm_sq.sqrt();
 
+    // Adaptive momentum: reduce when delta norms are volatile, increase when stable
+    lr_state.recent_norms.push(delta_norm);
+    if lr_state.recent_norms.len() > 10 {
+        lr_state.recent_norms.drain(..lr_state.recent_norms.len() - 10);
+    }
+    let outer_momentum = if lr_state.recent_norms.len() >= 3 {
+        let mean_n = lr_state.recent_norms.iter().sum::<f64>() / lr_state.recent_norms.len() as f64;
+        let var_n = lr_state.recent_norms.iter().map(|n| (n - mean_n).powi(2)).sum::<f64>()
+            / lr_state.recent_norms.len() as f64;
+        let cv = if mean_n > 0.0 { var_n.sqrt() / mean_n } else { 0.0 };
+        // CV < 0.3 -> 0.9 (stable), CV > 1.0 -> 0.3 (volatile), linear between
+        let target = (0.9 - 0.857 * (cv - 0.3).clamp(0.0, 0.7) / 0.7).clamp(0.3, 0.9);
+        let mom = lr_state.outer_momentum * 0.7 + target * 0.3;
+        info!("Adaptive momentum: norm_cv={cv:.3}, target={target:.2}, applied={mom:.3}");
+        mom
+    } else {
+        lr_state.outer_momentum
+    };
+    lr_state.outer_momentum = outer_momentum;
+
     info!(
-        "Avg delta norm={delta_norm:.4}, outer_lr={outer_lr}, outer_momentum={outer_momentum}"
+        "Avg delta norm={delta_norm:.4}, outer_lr={outer_lr}, outer_momentum={outer_momentum:.3}"
     );
 
     // 5. Apply Nesterov outer optimizer step
+    let mut outer_opt = NesterovOuterOptimizer::new(outer_lr, outer_momentum);
+    if let Some(vel) = velocity_state {
+        outer_opt.load_state_dict(vel);
+    }
     outer_opt.step(&mut checkpoint, &avg_delta);
 
     // 6. Upload new checkpoint

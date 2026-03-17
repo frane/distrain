@@ -54,6 +54,10 @@ pub struct TrainingResult {
     pub batch_size: usize,
     #[serde(default)]
     pub compression_stats: Option<CompressionStats>,
+    #[serde(default)]
+    pub loss_spiked: bool,
+    #[serde(default)]
+    pub loss_variance: f64,
 }
 
 /// Why a GPU training attempt failed.
@@ -448,8 +452,11 @@ where
     let mut total_tokens: u64 = 0;
     let mut last_loss: f64 = 0.0;
     let mut loss_sum: f64 = 0.0;
+    let mut loss_sq_sum: f64 = 0.0;
     let mut loss_count: u64 = 0;
     let mut steps_done: u64 = 0;
+    let mut loss_ema: f64 = 0.0;
+    let mut spike_detected = false;
 
     for step in 0..inner_steps {
         let lr = cosine_lr(step as usize, warmup, inner_steps as usize, lr_max, lr_min);
@@ -473,7 +480,15 @@ where
             if accum == 0 {
                 last_loss = loss_val;
                 loss_sum += loss_val;
+                loss_sq_sum += loss_val * loss_val;
                 loss_count += 1;
+                loss_ema = if loss_count == 1 { loss_val } else { loss_ema * 0.9 + loss_val * 0.1 };
+
+                // Spike detection: abort if loss diverges after warmup
+                if step as usize > warmup && loss_count > 3 && loss_val > loss_ema * 3.0 && loss_val > loss_ema + 5.0 {
+                    warn!("Loss spike: step {} loss={loss_val:.1} vs ema={loss_ema:.1} — aborting round", step + 1);
+                    spike_detected = true;
+                }
             }
 
             if step == 0 && accum == 0 { crate::resources::log_memory("after forward, before backward"); }
@@ -497,13 +512,16 @@ where
             tokens_processed: total_tokens,
             elapsed_secs: start_time.elapsed().as_secs_f64(),
         });
-        if should_abort {
-            info!("Aborting round early at step {step}/{inner_steps}");
+        if should_abort || spike_detected {
+            if spike_detected { info!("Aborting round due to loss spike at step {}/{inner_steps}", step + 1); }
             break;
         }
     }
 
     let mean_loss = if loss_count > 0 { loss_sum / loss_count as f64 } else { last_loss };
+    let loss_variance = if loss_count > 1 {
+        loss_sq_sum / loss_count as f64 - mean_loss * mean_loss
+    } else { 0.0 };
 
     let current_params = module.extract_state_dict();
     let shapes = module.extract_shapes();
@@ -544,6 +562,8 @@ where
         steps_completed: steps_done,
         batch_size,
         compression_stats: Some(comp_stats),
+        loss_spiked: spike_detected,
+        loss_variance,
     })
 }
 
@@ -1069,8 +1089,11 @@ where
     let mut total_tokens: u64 = 0;
     let mut last_loss: f64 = 0.0;
     let mut loss_sum: f64 = 0.0;
+    let mut loss_sq_sum: f64 = 0.0;
     let mut loss_count: u64 = 0;
     let mut steps_done: u64 = 0;
+    let mut loss_ema: f64 = 0.0;
+    let mut spike_detected = false;
 
     // batches is pre-generated as inner_steps * grad_accum_steps micro-batches
     let mut batch_iter = batches.into_iter();
@@ -1099,7 +1122,14 @@ where
             if accum == 0 {
                 last_loss = loss_val;
                 loss_sum += loss_val;
+                loss_sq_sum += loss_val * loss_val;
                 loss_count += 1;
+                loss_ema = if loss_count == 1 { loss_val } else { loss_ema * 0.9 + loss_val * 0.1 };
+
+                if step as usize > warmup && loss_count > 3 && loss_val > loss_ema * 3.0 && loss_val > loss_ema + 5.0 {
+                    warn!("Loss spike: step {} loss={loss_val:.1} vs ema={loss_ema:.1} — aborting round", step + 1);
+                    spike_detected = true;
+                }
             }
 
             let scaled_loss = loss / (grad_accum_steps as f32);
@@ -1120,13 +1150,16 @@ where
             tokens_processed: total_tokens,
             elapsed_secs: start_time.elapsed().as_secs_f64(),
         });
-        if should_abort {
-            info!("Aborting round early at step {step}/{inner_steps}");
+        if should_abort || spike_detected {
+            if spike_detected { info!("Aborting round due to loss spike at step {}/{inner_steps}", step + 1); }
             break;
         }
     }
 
     let mean_loss = if loss_count > 0 { loss_sum / loss_count as f64 } else { last_loss };
+    let loss_variance = if loss_count > 1 {
+        loss_sq_sum / loss_count as f64 - mean_loss * mean_loss
+    } else { 0.0 };
 
     let current_params = module.extract_state_dict();
     let shapes = module.extract_shapes();
@@ -1167,6 +1200,8 @@ where
         elapsed_secs: elapsed,
         batch_size,
         compression_stats: Some(comp_stats),
+        loss_spiked: spike_detected,
+        loss_variance,
     }, error_buffer))
 }
 
