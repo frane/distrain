@@ -75,6 +75,33 @@ enum Commands {
         #[arg(long)]
         seq_len: usize,
     },
+    /// Single-GPU baseline training (no coordinator, no compression, no CRDT)
+    /// For paper comparison: same model, same data, same hyperparameters.
+    Baseline {
+        /// Path to checkpoint file to start from
+        checkpoint: String,
+        /// Path to data directory with shard files
+        #[arg(long)]
+        data_dir: String,
+        /// Number of training steps
+        #[arg(long, default_value = "1000")]
+        steps: u64,
+        /// Output JSONL file for per-step metrics
+        #[arg(long, default_value = "baseline.jsonl")]
+        output: String,
+        /// Force CPU backend
+        #[arg(long)]
+        cpu: bool,
+        /// Batch size
+        #[arg(long, default_value = "4")]
+        batch_size: usize,
+        /// Sequence length
+        #[arg(long, default_value = "512")]
+        seq_len: usize,
+        /// Learning rate max
+        #[arg(long, default_value = "0.0003")]
+        lr_max: f64,
+    },
     /// Generate text from a checkpoint
     Generate {
         /// Path to checkpoint file
@@ -138,6 +165,18 @@ async fn main() -> Result<()> {
             seq_len,
         } => {
             run_gpu_stress_test_child(&checkpoint, batch_size, seq_len).await?;
+        }
+        Commands::Baseline {
+            checkpoint,
+            data_dir,
+            steps,
+            output,
+            cpu,
+            batch_size,
+            seq_len,
+            lr_max,
+        } => {
+            run_baseline(&checkpoint, &data_dir, steps, &output, cpu, batch_size, seq_len, lr_max).await?;
         }
         Commands::Generate {
             checkpoint,
@@ -827,6 +866,116 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         // Housekeeping: keep only the 3 most recent checkpoints in cache
         cleanup_old_checkpoints(&cache_dir, 3).await;
     }
+}
+
+/// Single-GPU baseline: train without coordinator, log per-step loss.
+/// For paper comparison: same model, same data, same hyperparameters as distributed run.
+async fn run_baseline(
+    checkpoint_path: &str,
+    data_dir: &str,
+    total_steps: u64,
+    output_path: &str,
+    force_cpu: bool,
+    batch_size: usize,
+    seq_len: usize,
+    lr_max: f64,
+) -> Result<()> {
+    use burn::grad_clipping::GradientClippingConfig;
+    use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
+    use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
+    use distrain_model::model::{DistrainTransformerModule, compute_lm_loss, precompute_rope_tables};
+    use distrain_model::training::cosine_lr;
+    use distrain_model::checkpoint::load_safetensors_map;
+    use distrain_model::{CpuBackend, CpuDevice, GpuBackend, GpuDevice};
+
+    let ckpt_path = std::path::Path::new(checkpoint_path);
+    let model_config = trainer::infer_model_config(ckpt_path)?;
+    info!("Baseline training: {} params, {} steps, batch_size={batch_size}, lr_max={lr_max:.2e}",
+        model_config.param_count(), total_steps);
+
+    // Load data shards from directory
+    let mut shard_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut entries = tokio::fs::read_dir(data_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("shard_") && name.ends_with(".bin") {
+            shard_files.push(entry.path());
+        }
+    }
+    shard_files.sort();
+    info!("Found {} shards in {data_dir}", shard_files.len());
+    anyhow::ensure!(!shard_files.is_empty(), "No shard files found in {data_dir}");
+
+    let mut data_loader = crate::data::DataLoader::from_files(&shard_files, batch_size, seq_len)?;
+    info!("DataLoader ready: {} tokens", data_loader.total_tokens());
+
+    let warmup_steps = ((total_steps as f64 * 0.2) as u64).max(2) as usize;
+    let lr_min = 1e-6;
+
+    let mut out_file = tokio::fs::OpenOptions::new()
+        .create(true).write(true).truncate(true)
+        .open(output_path).await?;
+
+    let start_params = load_safetensors_map(ckpt_path)?;
+
+    macro_rules! run_baseline_loop {
+        ($Backend:ty, $device:expr) => {{
+            let device = $device;
+            let (rope_cos, rope_sin) = precompute_rope_tables::<$Backend>(
+                model_config.head_dim(), model_config.max_seq_len, model_config.rope_theta, &device,
+            );
+            let module = DistrainTransformerModule::<$Backend>::new(&model_config, &device);
+            let mut module = module.load_state_dict(&start_params, &device);
+            let mut optim = AdamWConfig::new()
+                .with_weight_decay(0.1)
+                .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+                .init::<$Backend, DistrainTransformerModule<$Backend>>();
+
+            let start = std::time::Instant::now();
+            let mut total_tokens: u64 = 0;
+
+            for step in 0..total_steps {
+                let lr = cosine_lr(step as usize, warmup_steps, total_steps as usize, lr_max, lr_min);
+                let tokens = data_loader.next_batch_sized(batch_size);
+                let batch = Tensor::<$Backend, 2, Int>::from_data(
+                    TensorData::new(tokens, [batch_size, seq_len]), &device,
+                );
+                let loss = compute_lm_loss(&module, &rope_cos, &rope_sin, batch);
+                let loss_val: f64 = loss.clone().into_scalar().elem();
+                let grads = loss.backward();
+                let grads_params = GradientsParams::from_grads(grads, &module);
+                module = optim.step(lr, module, grads_params);
+
+                total_tokens += (batch_size * seq_len) as u64;
+                let elapsed = start.elapsed().as_secs_f64();
+
+                info!("Baseline step {}/{total_steps}: loss={loss_val:.4}, lr={lr:.2e}, tokens={total_tokens}",
+                    step + 1);
+
+                use tokio::io::AsyncWriteExt;
+                let entry = serde_json::json!({
+                    "step": step + 1, "loss": loss_val, "lr": lr,
+                    "tokens": total_tokens, "elapsed_secs": elapsed,
+                });
+                if let Ok(line) = serde_json::to_string(&entry) {
+                    let _ = out_file.write_all(format!("{line}\n").as_bytes()).await;
+                }
+            }
+            info!("Baseline complete: {total_steps} steps, {total_tokens} tokens, {:.1}s",
+                start.elapsed().as_secs_f64());
+        }};
+    }
+
+    if force_cpu {
+        let device: CpuDevice = Default::default();
+        run_baseline_loop!(CpuBackend, device);
+    } else {
+        run_baseline_loop!(GpuBackend, GpuDevice::default());
+    }
+
+    info!("Results written to {output_path}");
+    Ok(())
 }
 
 /// Delete old cached checkpoints, keeping only the N most recent.
