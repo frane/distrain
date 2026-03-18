@@ -907,7 +907,7 @@ async fn run_baseline(
     info!("Found {} shards in {data_dir}", shard_files.len());
     anyhow::ensure!(!shard_files.is_empty(), "No shard files found in {data_dir}");
 
-    let mut data_loader = crate::data::DataLoader::from_files(&shard_files, batch_size, seq_len)?;
+    let mut data_loader = crate::data::DataLoader::from_files(&shard_files, seq_len, batch_size)?;
     info!("DataLoader ready: {} tokens", data_loader.total_tokens());
 
     let warmup_steps = ((total_steps as f64 * 0.2) as u64).max(2) as usize;
