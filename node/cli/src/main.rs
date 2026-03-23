@@ -320,8 +320,14 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         // to old weights and no longer valid for the new checkpoint.
         if let Some(prev_v) = last_trained_version {
             if version != prev_v {
-                info!("Checkpoint advanced v{prev_v} → v{version} — clearing error buffer");
-                error_buffer = distrain_model::compression::ErrorBuffer::new();
+                // Phase 2: decay error buffer 50% instead of clearing.
+                // Old residuals are approximately correct for nearby checkpoints.
+                info!("Checkpoint advanced v{prev_v} → v{version} — decaying error buffer 50%");
+                for v in error_buffer.buffer.values_mut() {
+                    for x in v.iter_mut() {
+                        *x *= 0.5;
+                    }
+                }
             }
         }
 
@@ -701,6 +707,14 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
 
         last_trained_version = Some(version);
         result_elapsed = result.elapsed_secs;
+
+        // Phase 2: skip warmup after first round (model is already warm)
+        if let Some(ref mut tp) = config.training_params {
+            if tp.warmup_fraction > 0.0 {
+                info!("Skipping warmup for subsequent rounds (model is warm)");
+                tp.warmup_fraction = 0.0;
+            }
+        }
         info!(
             "Training done: {}/{} steps, loss={:.4}, tokens={}, time={:.1}s, batch_size={}, grad_accum={}, effective_batch={}",
             result.steps_completed, h_mini, result.final_loss, result.tokens_processed, result.elapsed_secs,
