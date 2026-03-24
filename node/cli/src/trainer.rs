@@ -27,9 +27,12 @@ use distrain_model::{CpuBackend, CpuDevice, GpuBackend, GpuDevice};
 /// Adaptive top-k: increase sparsification fraction as loss decreases.
 /// Early training has big gradients concentrated in few params — 1% captures signal.
 /// Late training has small gradients spread across many params — need more.
-fn adaptive_top_k(loss: f64) -> f32 {
-    // Phase 2+: aggressive top-k. Keep as much gradient as bandwidth allows.
-    let k = if loss > 20.0 {
+/// Bandwidth-aware adaptive top-k.
+/// `max_delta_bytes`: if Some, caps top-k so compressed delta fits within bandwidth budget.
+/// `raw_param_bytes`: total model parameter bytes (for computing top-k from budget).
+pub fn adaptive_top_k(loss: f64, max_delta_bytes: Option<u64>, raw_param_bytes: u64) -> f32 {
+    // Loss-based target: keep as much gradient as possible
+    let loss_k = if loss > 20.0 {
         0.20
     } else if loss > 10.0 {
         0.30
@@ -40,6 +43,26 @@ fn adaptive_top_k(loss: f64) -> f32 {
     } else {
         0.60
     };
+
+    // Bandwidth cap: if we measured upload speed, limit top-k so delta fits
+    // Target: upload should take < 30 seconds
+    let k = if let Some(max_bytes) = max_delta_bytes {
+        // Approximate: compressed delta ~ raw_param_bytes * k * 0.5 (INT8 + zstd)
+        let max_k = if raw_param_bytes > 0 {
+            (max_bytes as f64 / (raw_param_bytes as f64 * 0.5)) as f32
+        } else {
+            loss_k
+        };
+        let capped = loss_k.min(max_k);
+        if capped < loss_k {
+            info!("Bandwidth cap: top-k {:.1}% -> {:.1}% (max_delta={}MB)",
+                loss_k * 100.0, capped * 100.0, max_bytes / (1024 * 1024));
+        }
+        capped.max(0.01) // never below 1%
+    } else {
+        loss_k
+    };
+
     info!("Adaptive top-k: loss={loss:.2} → k={k} ({:.1}%)", k * 100.0);
     k
 }
@@ -526,7 +549,7 @@ where
     let shapes = module.extract_shapes();
     let delta = compute_outer_delta(&start_params, &current_params);
     let compression_config = CompressionConfig {
-        top_k_fraction: adaptive_top_k(mean_loss),
+        top_k_fraction: adaptive_top_k(mean_loss, None, 0),
         ..CompressionConfig::default()
     };
     let (compressed, comp_stats) =
@@ -1164,7 +1187,7 @@ where
     let shapes = module.extract_shapes();
     let delta = compute_outer_delta(&start_params, &current_params);
     let compression_config = CompressionConfig {
-        top_k_fraction: adaptive_top_k(mean_loss),
+        top_k_fraction: adaptive_top_k(mean_loss, None, 0),
         ..CompressionConfig::default()
     };
     let (compressed, comp_stats) =

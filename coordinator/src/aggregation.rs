@@ -55,11 +55,13 @@ fn compute_loss_based_outer_lr(current_lr: f64, avg_loss: f64, ln_vocab: f64) ->
     // ratio=50 (random init) -> 0.30, ratio=0.3 (converged) -> 0.03
     // Smooth transition instead of discrete brackets.
     let ln_ratio = if ratio > 0.01 { ratio.ln() } else { (-4.6f64) }; // floor at ln(0.01)
-    // Phase 2+: higher outer LR since deltas are higher quality (20% top-k, 75% retention)
-    let target_lr = (0.10 * ln_ratio + 0.25).clamp(0.10, 0.80);
+    // Outer LR close to 1.0: apply the full delta. With high-quality deltas (20% top-k,
+    // 75% retention) and momentum=0, there's no reason to dampen. Start at 0.8 for random
+    // init (conservative while loss is chaotic), ramp to 1.0 as training stabilizes.
+    let target_lr = (0.05 * ln_ratio + 0.85).clamp(0.50, 1.0);
 
     // EMA smooth
-    let new_lr = (current_lr * 0.7 + target_lr * 0.3).clamp(0.05, 0.80);
+    let new_lr = (current_lr * 0.7 + target_lr * 0.3).clamp(0.30, 1.0);
 
     (new_lr, target_lr, ratio)
 }

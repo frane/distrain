@@ -39,6 +39,10 @@ pub struct CoordinatorConfig {
     pub outer_momentum: f64,
     pub keep_versions: u64,
     pub vocab_size: u32,
+    /// Max storage in GB for coordinator (checkpoints + deltas + optimizer state).
+    /// When exceeded, oldest versions are deleted. 0 = use keep_versions only.
+    #[serde(default)]
+    pub max_storage_gb: u64,
 }
 
 impl Default for CoordinatorConfig {
@@ -54,6 +58,7 @@ impl Default for CoordinatorConfig {
             outer_momentum: 0.9,
             keep_versions: 10,
             vocab_size: 32768,
+            max_storage_gb: 0,
         }
     }
 }

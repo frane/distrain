@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Start { config, cpu } => {
             let mut config = load_config(&config)?;
-            config.force_cpu = cpu;
+            config.force_cpu = cpu || config.gpu_device < 0;
             run_training_loop(config).await?;
         }
         Commands::Bootstrap { config, preset } => {
@@ -289,6 +289,8 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     let mut stress_tested = false;
     // Whether the last round was aborted due to memory pressure.
     let mut memory_pressure_abort = false;
+    // Measured upload bandwidth (bytes/sec), used for bandwidth-aware top-k adaptation.
+    let mut measured_upload_bps: Option<f64> = None;
     // Persistent error buffer for compression error feedback across rounds.
     let mut error_buffer = distrain_model::compression::ErrorBuffer::new();
     // Last round's elapsed time (for poll delay estimation).
@@ -774,14 +776,23 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             }
         }
 
-        // Upload delta to R2 (retry with exponential backoff)
+        // Upload delta to R2 (retry with exponential backoff, measure bandwidth)
         let delta_key =
             distrain_shared::paths::delta_path(version, &node_id, seq_num);
+        let delta_file_size = tokio::fs::metadata(&delta_path).await.map(|m| m.len()).unwrap_or(0);
+        let upload_start = std::time::Instant::now();
         let mut upload_ok = false;
         for attempt in 1..=5 {
             match storage.upload_from_file(&delta_key, &delta_path).await {
                 Ok(()) => {
                     upload_ok = true;
+                    let upload_secs = upload_start.elapsed().as_secs_f64();
+                    if upload_secs > 0.1 && delta_file_size > 0 {
+                        let bps = delta_file_size as f64 / upload_secs;
+                        measured_upload_bps = Some(bps);
+                        info!("Upload: {:.1}MB in {upload_secs:.1}s ({:.1} MB/s)",
+                            delta_file_size as f64 / 1e6, bps / 1e6);
+                    }
                     break;
                 }
                 Err(e) => {
