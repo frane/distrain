@@ -55,10 +55,11 @@ fn compute_loss_based_outer_lr(current_lr: f64, avg_loss: f64, ln_vocab: f64) ->
     // ratio=50 (random init) -> 0.30, ratio=0.3 (converged) -> 0.03
     // Smooth transition instead of discrete brackets.
     let ln_ratio = if ratio > 0.01 { ratio.ln() } else { (-4.6f64) }; // floor at ln(0.01)
-    let target_lr = (0.053 * ln_ratio + 0.094).clamp(0.02, 0.30);
+    // Phase 2+: higher outer LR since deltas are higher quality (20% top-k, 75% retention)
+    let target_lr = (0.10 * ln_ratio + 0.25).clamp(0.10, 0.80);
 
     // EMA smooth
-    let new_lr = (current_lr * 0.7 + target_lr * 0.3).clamp(0.01, 0.35);
+    let new_lr = (current_lr * 0.7 + target_lr * 0.3).clamp(0.05, 0.80);
 
     (new_lr, target_lr, ratio)
 }
@@ -262,24 +263,13 @@ pub async fn run_aggregation(
         .sum();
     let delta_norm = delta_norm_sq.sqrt();
 
-    // Adaptive momentum: reduce when delta norms are volatile, increase when stable
+    // Phase 2+: momentum=0. With high-quality deltas (20% top-k) and few nodes (2-3),
+    // momentum amplifies noise more than it helps. Apply the delta directly.
     lr_state.recent_norms.push(delta_norm);
     if lr_state.recent_norms.len() > 10 {
         lr_state.recent_norms.drain(..lr_state.recent_norms.len() - 10);
     }
-    let outer_momentum = if lr_state.recent_norms.len() >= 3 {
-        let mean_n = lr_state.recent_norms.iter().sum::<f64>() / lr_state.recent_norms.len() as f64;
-        let var_n = lr_state.recent_norms.iter().map(|n| (n - mean_n).powi(2)).sum::<f64>()
-            / lr_state.recent_norms.len() as f64;
-        let cv = if mean_n > 0.0 { var_n.sqrt() / mean_n } else { 0.0 };
-        // CV < 0.3 -> 0.9 (stable), CV > 1.0 -> 0.3 (volatile), linear between
-        let target = (0.9 - 0.857 * (cv - 0.3).clamp(0.0, 0.7) / 0.7).clamp(0.3, 0.9);
-        let mom = lr_state.outer_momentum * 0.7 + target * 0.3;
-        info!("Adaptive momentum: norm_cv={cv:.3}, target={target:.2}, applied={mom:.3}");
-        mom
-    } else {
-        lr_state.outer_momentum
-    };
+    let outer_momentum = 0.0;
     lr_state.outer_momentum = outer_momentum;
 
     info!(

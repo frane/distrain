@@ -235,7 +235,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
 
     // Phase 1: Just check if a GPU adapter exists. No model loading, no calibration.
     // Actual backend selection + H_mini computed from real model in Phase 2.
-    let mut h_mini: u64 = config.min_inner_steps; // placeholder, overridden in Phase 2
+    let mut h_mini: u64 = config.min_inner_steps; // temporary, overridden by coordinator params below
     if !config.force_cpu {
         let verdict = trainer::probe_gpu().await;
         match verdict {
@@ -267,7 +267,13 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         .cloned()
         .unwrap_or_default();
     let requested_shards = params.shards_per_node(total_shards);
+    // Use centralized training params for inner steps and push interval
+    let min_h = params.min_inner_steps;
+    let max_h = params.max_inner_steps;
+    let target_interval = params.target_push_interval_secs;
     info!("Data manifest: {total_shards} shards, requested {requested_shards} per round");
+    h_mini = min_h; // use coordinator-provided value
+    info!("Training params: H_mini=[{min_h}, {max_h}], push_interval={target_interval}s");
 
     // Will be clamped by memory budget once we know the model size (first checkpoint)
     let mut shards_per_node = requested_shards;
@@ -392,9 +398,6 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         //
         // Then calibrate batch_size + benchmark the chosen backend for H_mini.
         if !stress_tested {
-            let target_interval = config.target_push_interval_secs;
-            let min_h = config.min_inner_steps;
-            let max_h = config.max_inner_steps;
             let model_config = trainer::infer_model_config(&ckpt_path)?;
             // Model weights in BF16 (2 bytes/param) — this is what the GPU actually loads
             let model_weight_bytes = model_config.param_count() as u64 * 2;
@@ -606,7 +609,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                         "GPU hung during training (timeout {timeout_secs:.0}s) — falling back to CPU permanently"
                     );
                     config.force_cpu = true;
-                    h_mini = config.min_inner_steps;
+                    h_mini = min_h;
                     // Re-calibrate batch_size for CPU
                     let (cal_bs, cal_accum, _) = trainer::calibrate_batch_size(
                         &ckpt_path, config.seq_len, false, effective_batch_size,
@@ -632,7 +635,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                         "GPU panicked at batch_size=1: {message} — falling back to CPU permanently"
                     );
                     config.force_cpu = true;
-                    h_mini = config.min_inner_steps;
+                    h_mini = min_h;
                     let (cal_bs, cal_accum, _) = trainer::calibrate_batch_size(
                         &ckpt_path, config.seq_len, false, effective_batch_size,
                     ).await;
@@ -724,8 +727,8 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         // Refine H_mini from actual training speed (first round or after fallback)
         if result.steps_completed > 0 && result.elapsed_secs > 0.0 {
             let actual_sps = result.elapsed_secs / result.steps_completed as f64;
-            let refined = ((config.target_push_interval_secs / actual_sps) as u64)
-                .clamp(config.min_inner_steps, config.max_inner_steps);
+            let refined = ((target_interval / actual_sps) as u64)
+                .clamp(min_h, max_h);
             if refined != h_mini {
                 info!("Refining H_mini: {h_mini} → {refined} (measured {actual_sps:.1}s/step)");
                 h_mini = refined;

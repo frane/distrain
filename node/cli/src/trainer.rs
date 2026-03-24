@@ -28,19 +28,17 @@ use distrain_model::{CpuBackend, CpuDevice, GpuBackend, GpuDevice};
 /// Early training has big gradients concentrated in few params — 1% captures signal.
 /// Late training has small gradients spread across many params — need more.
 fn adaptive_top_k(loss: f64) -> f32 {
-    // Phase 2: 10x higher top-k. 250MB per push is fine on residential internet.
+    // Phase 2+: aggressive top-k. Keep as much gradient as bandwidth allows.
     let k = if loss > 20.0 {
-        0.05
-    } else if loss > 10.0 {
-        0.10
-    } else if loss > 7.0 {
-        0.15
-    } else if loss > 5.0 {
         0.20
-    } else if loss > 3.0 {
-        0.25
-    } else {
+    } else if loss > 10.0 {
         0.30
+    } else if loss > 7.0 {
+        0.40
+    } else if loss > 5.0 {
+        0.50
+    } else {
+        0.60
     };
     info!("Adaptive top-k: loss={loss:.2} → k={k} ({:.1}%)", k * 100.0);
     k

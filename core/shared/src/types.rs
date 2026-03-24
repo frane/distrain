@@ -145,7 +145,17 @@ pub struct TrainingParams {
     pub grad_clip_norm: f64,
     pub warmup_fraction: f64,
     pub shards_fraction: f64,
+    #[serde(default = "default_min_inner_steps")]
+    pub min_inner_steps: u64,
+    #[serde(default = "default_max_inner_steps")]
+    pub max_inner_steps: u64,
+    #[serde(default = "default_target_push_interval")]
+    pub target_push_interval_secs: f64,
 }
+
+fn default_min_inner_steps() -> u64 { 50 }
+fn default_max_inner_steps() -> u64 { 500 }
+fn default_target_push_interval() -> f64 { 60.0 }
 
 impl TrainingParams {
     /// Compute the number of shards this node should train on per round.
@@ -167,6 +177,9 @@ impl Default for TrainingParams {
             grad_clip_norm: 1.0,
             warmup_fraction: 0.2,
             shards_fraction: 0.2,
+            min_inner_steps: 50,
+            max_inner_steps: 500,
+            target_push_interval_secs: 60.0,
         }
     }
 }
