@@ -267,9 +267,14 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         .cloned()
         .unwrap_or_default();
     let requested_shards = params.shards_per_node(total_shards);
-    // Use centralized training params for inner steps and push interval
-    let min_h = params.min_inner_steps;
-    let max_h = params.max_inner_steps;
+    // Use centralized training params, but allow local node.toml to cap H_mini
+    // (e.g., thermally limited devices like Intel laptops)
+    let min_h = if config.max_inner_steps < params.min_inner_steps {
+        config.max_inner_steps  // local cap takes precedence
+    } else {
+        params.min_inner_steps
+    };
+    let max_h = config.max_inner_steps.min(params.max_inner_steps);
     let target_interval = params.target_push_interval_secs;
     info!("Data manifest: {total_shards} shards, requested {requested_shards} per round");
     h_mini = min_h; // use coordinator-provided value
