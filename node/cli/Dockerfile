@@ -1,9 +1,7 @@
 FROM rust:1.93-bookworm AS builder
 
 WORKDIR /app
-COPY Cargo.toml Cargo.lock* ./
-COPY core/ core/
-COPY node/cli/ node/cli/
+COPY . .
 
 RUN cargo build --release -p distrain-node
 
