@@ -7,11 +7,13 @@ description = "DistrainTransformer implemented in Burn — pure Rust ML"
 [features]
 default = ["zstd-compression"]
 zstd-compression = ["dep:zstd"]
+cuda = ["dep:burn-cuda"]
 
 [dependencies]
 burn = { workspace = true, features = ["autodiff"] }
 burn-wgpu = { workspace = true, default-features = false, features = ["std", "autotune"] }
 burn-ndarray = { workspace = true }
+burn-cuda = { version = "0.20", optional = true }
 safetensors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -122,6 +122,14 @@ pub struct StepProgress {
     pub elapsed_secs: f64,
 }
 
+/// Which GPU backend to use.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GpuBackendType {
+    Wgpu,
+    #[cfg(feature = "cuda")]
+    Cuda,
+}
+
 /// Result of probing GPU hardware.
 #[derive(Debug, Clone)]
 pub enum GpuVerdict {
@@ -131,14 +139,39 @@ pub enum GpuVerdict {
         backend: String,
         is_integrated: bool,
         max_buffer_size: u64,
+        backend_type: GpuBackendType,
     },
     /// No GPU adapter found at all — use CPU.
     NoAdapter,
 }
 
-/// Probe for a GPU adapter. Does NOT run any compute — just checks if an
-/// adapter exists and queries its capabilities.
+/// Probe for a GPU adapter. Tries CUDA first (if compiled in), then wgpu, then gives up.
 pub async fn probe_gpu() -> GpuVerdict {
+    // Try CUDA first (best performance on NVIDIA)
+    #[cfg(feature = "cuda")]
+    {
+        // Check if nvidia-smi works as a quick CUDA probe
+        if let Ok(output) = std::process::Command::new("nvidia-smi")
+            .arg("--query-gpu=name,memory.total")
+            .arg("--format=csv,noheader")
+            .output()
+        {
+            if output.status.success() {
+                let info = String::from_utf8_lossy(&output.stdout);
+                let name = info.trim().split(',').next().unwrap_or("NVIDIA GPU").trim().to_string();
+                info!("CUDA GPU detected: {name}");
+                return GpuVerdict::Available {
+                    name,
+                    backend: "CUDA".to_string(),
+                    is_integrated: false,
+                    max_buffer_size: u64::MAX,
+                    backend_type: GpuBackendType::Cuda,
+                };
+            }
+        }
+    }
+
+    // Try wgpu (Metal/Vulkan/WebGPU)
     let instance = wgpu::Instance::default();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -159,7 +192,7 @@ pub async fn probe_gpu() -> GpuVerdict {
                 "GPU detected: {name} (vendor={}, type={:?}, backend={backend}, max_buffer={}MB)",
                 gpu_info.vendor, gpu_info.device_type, max_buffer_size / (1024 * 1024),
             );
-            GpuVerdict::Available { name, backend, is_integrated, max_buffer_size }
+            GpuVerdict::Available { name, backend, is_integrated, max_buffer_size, backend_type: GpuBackendType::Wgpu }
         }
         Err(e) => {
             info!("No GPU adapter found: {e}");

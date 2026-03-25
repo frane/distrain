@@ -1,0 +1,30 @@
+FROM nvidia/cuda:11.8.0-devel-ubuntu22.04 AS builder
+
+# Install Rust
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential pkg-config libssl-dev libvulkan-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /app
+COPY . .
+
+RUN cargo build --release -p distrain-node --features cuda
+
+# Runtime
+FROM nvidia/cuda:11.8.0-base-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libvulkan1 openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd
+
+ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+ENV XDG_RUNTIME_DIR=/tmp
+
+COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
+
+# Start SSH daemon and keep alive
+RUN echo '#!/bin/bash\nmkdir -p /root/.ssh\nif [ -n "$PUBLIC_KEY" ]; then\n  echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys\n  chmod 600 /root/.ssh/authorized_keys\nfi\n/usr/sbin/sshd\nexec sleep infinity' > /start.sh && chmod +x /start.sh
+CMD ["/start.sh"]

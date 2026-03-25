@@ -28,12 +28,20 @@ use burn::backend::Autodiff;
 use burn_wgpu::Wgpu;
 use burn_ndarray::NdArray;
 
-/// Primary backend: GPU via wgpu (Metal on macOS, Vulkan on Linux/Windows, WebGPU in browser).
-pub type GpuBackend = Autodiff<Wgpu>;
-/// GPU device handle.
-pub type GpuDevice = <Wgpu as burn::tensor::backend::Backend>::Device;
+/// GPU via wgpu (Metal on macOS, Vulkan on Linux/Windows, WebGPU in browser).
+pub type WgpuBackend = Autodiff<Wgpu>;
+pub type WgpuDevice = <Wgpu as burn::tensor::backend::Backend>::Device;
 
-/// Fallback backend: CPU via ndarray. Used when no GPU is available or in tests.
+// Backward compat aliases
+pub type GpuBackend = WgpuBackend;
+pub type GpuDevice = WgpuDevice;
+
+/// CUDA backend (NVIDIA GPUs on Linux). Compile with --features cuda.
+#[cfg(feature = "cuda")]
+pub type CudaBackend = Autodiff<burn_cuda::Cuda>;
+#[cfg(feature = "cuda")]
+pub type CudaDeviceType = <burn_cuda::Cuda as burn::tensor::backend::Backend>::Device;
+
+/// CPU via ndarray. Used when no GPU is available or in tests.
 pub type CpuBackend = Autodiff<NdArray<f32>>;
-/// CPU device handle.
 pub type CpuDevice = <NdArray<f32> as burn::tensor::backend::Backend>::Device;

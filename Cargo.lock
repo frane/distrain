@@ -3081,6 +3081,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "burn",
+ "burn-cuda",
  "burn-ndarray",
  "burn-wgpu",
  "safetensors 0.5.3",

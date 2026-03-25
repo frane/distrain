@@ -7,7 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY . .
 
-RUN cargo build --release -p distrain-node
+# Build with CUDA support if CUDA_ENABLED build arg is set
+ARG CUDA_ENABLED=false
+RUN if [ "$CUDA_ENABLED" = "true" ]; then \
+      cargo build --release -p distrain-node --features cuda; \
+    else \
+      cargo build --release -p distrain-node; \
+    fi
 
 # Runtime — pure Rust, no Python dependency
 FROM debian:bookworm-slim
