@@ -9,8 +9,11 @@ RUN cargo build --release -p distrain-node
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    ca-certificates libvulkan1 \
     && rm -rf /var/lib/apt/lists/*
+
+ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+ENV XDG_RUNTIME_DIR=/tmp
 
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
 
