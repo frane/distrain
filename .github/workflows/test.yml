@@ -2,8 +2,9 @@ name: Test
 on:
   push:
     branches: [main]
-    paths: ['core/**', 'coordinator/**', 'node/cli/**', 'Cargo.*']
+    paths: ['core/**', 'coordinator/**', 'node/cli/**', 'node/ffi/**', 'Cargo.*', '.github/workflows/test.yml']
   pull_request:
+  workflow_dispatch:
 jobs:
   test:
     runs-on: ubuntu-latest
