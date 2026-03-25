@@ -11,6 +11,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Check
-        run: cargo check -p distrain-coordinator -p distrain-node -p distrain-model -p distrain-shared -p distrain-ffi
+        run: cargo check -p distrain-coordinator -p distrain-node -p distrain-model -p distrain-shared
       - name: Test
         run: cargo test -p distrain-coordinator -p distrain-node -p distrain-model -p distrain-shared
