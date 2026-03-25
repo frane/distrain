@@ -32,15 +32,16 @@ use burn_ndarray::NdArray;
 pub type WgpuBackend = Autodiff<Wgpu>;
 pub type WgpuDevice = <Wgpu as burn::tensor::backend::Backend>::Device;
 
-// Backward compat aliases
-pub type GpuBackend = WgpuBackend;
-pub type GpuDevice = WgpuDevice;
+/// When compiled with CUDA, GpuBackend uses CUDA. Otherwise wgpu.
+#[cfg(feature = "cuda")]
+pub type GpuBackend = Autodiff<burn_cuda::Cuda>;
+#[cfg(feature = "cuda")]
+pub type GpuDevice = <burn_cuda::Cuda as burn::tensor::backend::Backend>::Device;
 
-/// CUDA backend (NVIDIA GPUs on Linux). Compile with --features cuda.
-#[cfg(feature = "cuda")]
-pub type CudaBackend = Autodiff<burn_cuda::Cuda>;
-#[cfg(feature = "cuda")]
-pub type CudaDeviceType = <burn_cuda::Cuda as burn::tensor::backend::Backend>::Device;
+#[cfg(not(feature = "cuda"))]
+pub type GpuBackend = WgpuBackend;
+#[cfg(not(feature = "cuda"))]
+pub type GpuDevice = WgpuDevice;
 
 /// CPU via ndarray. Used when no GPU is available or in tests.
 pub type CpuBackend = Autodiff<NdArray<f32>>;
