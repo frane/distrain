@@ -1,8 +1,8 @@
-name: Build Coordinator
+name: Build Node GPU
 on:
   push:
     branches: [main]
-    paths: ['coordinator/**', 'core/**', 'Cargo.*']
+    paths: ['node/cli/Dockerfile.runpod']
   workflow_dispatch:
 env:
   REGISTRY: ghcr.io/frane/distrain
@@ -12,6 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    needs: []
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
@@ -23,8 +24,8 @@ jobs:
       - uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./coordinator/Dockerfile
+          file: ./node/cli/Dockerfile.runpod
           push: true
-          tags: ${{ env.REGISTRY }}/coordinator:${{ github.sha }},${{ env.REGISTRY }}/coordinator:latest
+          tags: ${{ env.REGISTRY }}/node-gpu:${{ github.sha }},${{ env.REGISTRY }}/node-gpu:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

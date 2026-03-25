@@ -1,8 +1,8 @@
-name: Build Coordinator
+name: Build Node
 on:
   push:
     branches: [main]
-    paths: ['coordinator/**', 'core/**', 'Cargo.*']
+    paths: ['node/cli/**', 'core/**', 'Cargo.*']
   workflow_dispatch:
 env:
   REGISTRY: ghcr.io/frane/distrain
@@ -23,8 +23,8 @@ jobs:
       - uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./coordinator/Dockerfile
+          file: ./node/cli/Dockerfile
           push: true
-          tags: ${{ env.REGISTRY }}/coordinator:${{ github.sha }},${{ env.REGISTRY }}/coordinator:latest
+          tags: ${{ env.REGISTRY }}/node:${{ github.sha }},${{ env.REGISTRY }}/node:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

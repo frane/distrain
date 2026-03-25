@@ -1,0 +1,16 @@
+name: Test
+on:
+  push:
+    branches: [main]
+    paths: ['core/**', 'coordinator/**', 'node/cli/**', 'Cargo.*']
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check
+        run: cargo check -p distrain-coordinator -p distrain-node -p distrain-model -p distrain-shared -p distrain-ffi
+      - name: Test
+        run: cargo test -p distrain-coordinator -p distrain-node -p distrain-model -p distrain-shared
