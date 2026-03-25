@@ -18,4 +18,5 @@ ENV XDG_RUNTIME_DIR=/tmp
 
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
 
-CMD ["distrain-node", "start", "--config", "/etc/distrain/node.toml"]
+# Default: just keep container alive for SSH access. Training started manually or via entrypoint.
+CMD ["sleep", "infinity"]
