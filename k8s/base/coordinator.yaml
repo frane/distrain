@@ -13,6 +13,8 @@ spec:
       labels:
         app: coordinator
     spec:
+      imagePullSecrets:
+      - name: ghcr-secret
       containers:
       - name: coordinator
         image: ghcr.io/frane/distrain/coordinator:latest

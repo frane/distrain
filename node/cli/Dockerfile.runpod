@@ -1,0 +1,19 @@
+FROM rust:1.93-bookworm AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release -p distrain-node
+
+FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
+
+# Install Vulkan for wgpu/burn GPU backend
+RUN apt-get update -qq && \
+    apt-get install -y -qq libvulkan1 mesa-vulkan-drivers && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set NVIDIA Vulkan ICD
+ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
+ENV XDG_RUNTIME_DIR=/tmp
+
+COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
+
+CMD ["distrain-node", "start", "--config", "/etc/distrain/node.toml"]
