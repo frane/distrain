@@ -13,7 +13,7 @@ cuda = ["dep:burn-cuda"]
 burn = { workspace = true, features = ["autodiff"] }
 burn-wgpu = { workspace = true, default-features = false, features = ["std", "autotune"] }
 burn-ndarray = { workspace = true }
-burn-cuda = { version = "0.20", optional = true }
+burn-cuda = { version = "0.20", optional = true, default-features = false, features = ["std", "autotune"] }
 safetensors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
