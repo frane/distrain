@@ -9,8 +9,9 @@ RUN cargo build --release -p distrain-node
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libvulkan1 \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates libvulkan1 openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd
 
 ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
 ENV XDG_RUNTIME_DIR=/tmp
