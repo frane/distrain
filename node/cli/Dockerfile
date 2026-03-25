@@ -18,5 +18,14 @@ ENV XDG_RUNTIME_DIR=/tmp
 
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
 
-# Default: just keep container alive for SSH access. Training started manually or via entrypoint.
-CMD ["sleep", "infinity"]
+# Entrypoint: setup SSH keys from RunPod env, start sshd, keep alive
+RUN echo '#!/bin/bash\n\
+mkdir -p /root/.ssh\n\
+if [ -n "$PUBLIC_KEY" ]; then\n\
+  echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys\n\
+  chmod 600 /root/.ssh/authorized_keys\n\
+fi\n\
+/usr/sbin/sshd\n\
+exec sleep infinity' > /start.sh && chmod +x /start.sh
+
+CMD ["/start.sh"]
