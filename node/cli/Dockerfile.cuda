@@ -11,6 +11,9 @@ COPY . .
 
 RUN cargo build --release -p distrain-node --features cuda
 
+# Build CUDA compat shim for older drivers (< 565) missing _v2 symbols
+RUN gcc -shared -fPIC -o cuda_compat.so node/cli/cuda_compat.c -ldl
+
 # Runtime — CUDA 12.4 base, compatible with any 12.4+ driver
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 
@@ -23,6 +26,7 @@ ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
 ENV XDG_RUNTIME_DIR=/tmp
 
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
+COPY --from=builder /app/cuda_compat.so /usr/local/lib/libcuda_compat.so
 
 # Entrypoint: generate node.toml from env vars, start SSH + training
 COPY node/cli/entrypoint.sh /entrypoint.sh
