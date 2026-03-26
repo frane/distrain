@@ -9,6 +9,10 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /app
 COPY . .
 
+# Pin CUDA 12.4 bindings so the binary works with any driver 550+
+# Without this, cudarc detects the build machine's CUDA version and may
+# produce binaries requiring newer drivers than RunPod hosts provide.
+ENV CUDARC_CUDA_VERSION=12040
 RUN cargo build --release -p distrain-node --features cuda
 
 # Build CUDA compat shim for older drivers (< 565) missing _v2 symbols
