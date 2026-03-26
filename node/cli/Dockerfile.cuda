@@ -1,6 +1,5 @@
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
 
-# Install Rust
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential pkg-config libssl-dev libvulkan-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -12,7 +11,7 @@ COPY . .
 
 RUN cargo build --release -p distrain-node --features cuda
 
-# Runtime
+# Runtime — CUDA 12.4 base, compatible with any 12.4+ driver
 FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,6 +24,8 @@ ENV XDG_RUNTIME_DIR=/tmp
 
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
 
-# Start SSH daemon and keep alive
-RUN echo '#!/bin/bash\nmkdir -p /root/.ssh\nif [ -n "$PUBLIC_KEY" ]; then\n  echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys\n  chmod 600 /root/.ssh/authorized_keys\nfi\n/usr/sbin/sshd\nexec sleep infinity' > /start.sh && chmod +x /start.sh
-CMD ["/start.sh"]
+# Entrypoint: generate node.toml from env vars, start SSH + training
+COPY node/cli/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+CMD ["/entrypoint.sh"]
