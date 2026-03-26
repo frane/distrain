@@ -8,6 +8,7 @@
  * Build:   gcc -shared -fPIC -o libcuda_compat.so cuda_compat.c -ldl
  * Usage:   LD_PRELOAD=/usr/local/lib/libcuda_compat.so distrain-node ...
  */
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stddef.h>
 
