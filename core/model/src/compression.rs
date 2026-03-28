@@ -505,7 +505,8 @@ mod tests {
 
         assert_eq!(recovered["weight"].len(), 1000);
         let nonzero = recovered["weight"].iter().filter(|v| **v != 0.0).count();
-        assert_eq!(nonzero, 100);
+        // top_k_fraction=0.1 on 1000 elements ≈ 100 (±1 due to rounding)
+        assert!(nonzero >= 99 && nonzero <= 101, "expected ~100 nonzero, got {nonzero}");
     }
 
     #[cfg(feature = "zstd-compression")]
@@ -520,13 +521,13 @@ mod tests {
         };
         let mut buf = ErrorBuffer::new();
 
-        let compressed = compress_delta(&delta, &shapes, &config, &mut buf).unwrap();
+        let (compressed, _stats) = compress_delta(&delta, &shapes, &config, &mut buf).unwrap();
         let recovered = decompress_delta(&compressed).unwrap();
 
         assert_eq!(recovered["weight"].len(), 1000);
-        // 10% kept, so 100 non-zero
+        // 10% kept, so ~100 non-zero (±1 due to rounding)
         let nonzero = recovered["weight"].iter().filter(|v| **v != 0.0).count();
-        assert_eq!(nonzero, 100);
+        assert!(nonzero >= 99 && nonzero <= 101, "expected ~100 nonzero, got {nonzero}");
     }
 
     #[test]
@@ -616,7 +617,8 @@ mod tests {
                 "quantize_int8": true,
                 "zstd_level": 3,
                 "min_top_k_fraction": 0.001,
-                "max_top_k_fraction": 0.1
+                "max_top_k_fraction": 0.1,
+                "per_tensor_adaptive": false
             }
         }"#;
 
@@ -645,7 +647,7 @@ mod tests {
         };
         let mut buf = ErrorBuffer::new();
 
-        let compressed = compress_delta(&delta, &shapes, &config, &mut buf).unwrap();
+        let (compressed, _stats) = compress_delta(&delta, &shapes, &config, &mut buf).unwrap();
 
         // Decompress zstd to inspect JSON
         let json_bytes = zstd::decode_all(compressed.as_slice()).unwrap();
@@ -693,11 +695,11 @@ mod tests {
         };
         let mut buf = ErrorBuffer::new();
 
-        let compressed = compress_delta(&delta, &shapes, &config, &mut buf).unwrap();
+        let (compressed, _stats) = compress_delta(&delta, &shapes, &config, &mut buf).unwrap();
         let recovered = decompress_delta(&compressed).unwrap();
 
         assert_eq!(recovered["param"].len(), 1000);
         let nonzero = recovered["param"].iter().filter(|v| **v != 0.0).count();
-        assert_eq!(nonzero, 100); // 10% top-k
+        assert!(nonzero >= 99 && nonzero <= 101, "expected ~100 nonzero, got {nonzero}");
     }
 }

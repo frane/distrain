@@ -339,7 +339,7 @@ mod tests {
         };
         let mut buf = ErrorBuffer::new();
 
-        let compressed = train_and_compress(&start, &current, &shapes, &config, &mut buf).unwrap();
+        let (compressed, _stats) = train_and_compress(&start, &current, &shapes, &config, &mut buf).unwrap();
         assert!(!compressed.is_empty());
     }
 
