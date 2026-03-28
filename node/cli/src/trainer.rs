@@ -31,17 +31,18 @@ use distrain_model::{CpuBackend, CpuDevice, GpuBackend, GpuDevice};
 /// `max_delta_bytes`: if Some, caps top-k so compressed delta fits within bandwidth budget.
 /// `raw_param_bytes`: total model parameter bytes (for computing top-k from budget).
 pub fn adaptive_top_k(loss: f64, max_delta_bytes: Option<u64>, raw_param_bytes: u64) -> f32 {
-    // Loss-based target: keep as much gradient as possible
+    // Loss-based target: keep as much gradient as possible.
+    // Higher retention = less information loss = closer to baseline convergence.
     let loss_k = if loss > 20.0 {
-        0.20
-    } else if loss > 10.0 {
-        0.30
-    } else if loss > 7.0 {
         0.40
-    } else if loss > 5.0 {
+    } else if loss > 10.0 {
         0.50
-    } else {
+    } else if loss > 7.0 {
+        0.55
+    } else if loss > 5.0 {
         0.60
+    } else {
+        0.65
     };
 
     // Bandwidth cap: if we measured upload speed, limit top-k so delta fits

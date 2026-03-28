@@ -51,17 +51,14 @@ fn default_momentum() -> f64 { 0.9 }
 fn compute_loss_based_outer_lr(current_lr: f64, avg_loss: f64, ln_vocab: f64) -> (f64, f64, f64) {
     let ratio = avg_loss / ln_vocab;
 
-    // Continuous log-linear schedule (no cliff edges):
-    // ratio=50 (random init) -> 0.30, ratio=0.3 (converged) -> 0.03
-    // Smooth transition instead of discrete brackets.
+    // Start at 1.0 and let the self-optimizer come down if needed.
+    // The merged delta is already weighted and compressed — applying it at less than
+    // 1.0 throws away signal. Only reduce for truly chaotic early training (ratio > 10).
     let ln_ratio = if ratio > 0.01 { ratio.ln() } else { (-4.6f64) }; // floor at ln(0.01)
-    // Outer LR close to 1.0: apply the full delta. With high-quality deltas (20% top-k,
-    // 75% retention) and momentum=0, there's no reason to dampen. Start at 0.8 for random
-    // init (conservative while loss is chaotic), ramp to 1.0 as training stabilizes.
-    let target_lr = (0.05 * ln_ratio + 0.85).clamp(0.50, 1.0);
+    let target_lr = (0.02 * ln_ratio + 0.96).clamp(0.80, 1.0);
 
-    // EMA smooth
-    let new_lr = (current_lr * 0.7 + target_lr * 0.3).clamp(0.30, 1.0);
+    // EMA smooth (lighter smoothing to respond faster)
+    let new_lr = (current_lr * 0.5 + target_lr * 0.5).clamp(0.70, 1.0);
 
     (new_lr, target_lr, ratio)
 }
