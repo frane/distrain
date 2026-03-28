@@ -15,14 +15,11 @@ COPY . .
 ENV CUDARC_CUDA_VERSION=12040
 RUN cargo build --release -p distrain-node --features cuda
 
-# Build CUDA compat shim for older drivers (< 565) missing _v2 symbols
-RUN gcc -shared -fPIC -o cuda_compat.so node/cli/cuda_compat.c -ldl
-
-# Runtime — CUDA 12.4 base, compatible with any 12.4+ driver
-FROM nvidia/cuda:12.4.1-base-ubuntu22.04
+# Runtime — CUDA 12.4 with NVRTC (burn-cuda compiles kernels at runtime)
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libvulkan1 openssh-server \
+    ca-certificates libvulkan1 openssh-server cuda-nvrtc-12-4 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
 
@@ -30,7 +27,6 @@ ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
 ENV XDG_RUNTIME_DIR=/tmp
 
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
-COPY --from=builder /app/cuda_compat.so /usr/local/lib/libcuda_compat.so
 
 # Entrypoint: generate node.toml from env vars, start SSH + training
 COPY node/cli/entrypoint.sh /entrypoint.sh
