@@ -10,9 +10,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use distrain_node::{client, data, resources, trainer};
-use distrain_shared::config::NodeConfig;
+use distrain_shared::config::{NodeConfig, StorageConfig};
 use distrain_shared::storage::Storage;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Parser)]
 #[command(name = "distrain-node", about = "Distrain GPU node client")]
@@ -30,6 +30,9 @@ enum Commands {
         /// Force CPU backend (ndarray) instead of GPU
         #[arg(long)]
         cpu: bool,
+        /// Auto-discover config from coordinator URL (no node.toml needed)
+        #[arg(long)]
+        coordinator_url: Option<String>,
     },
     /// Create and upload a v0 checkpoint to R2
     Bootstrap {
@@ -130,8 +133,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start { config, cpu } => {
-            let mut config = load_config(&config)?;
+        Commands::Start { config, cpu, coordinator_url } => {
+            let mut config = if let Some(ref url) = coordinator_url {
+                build_config_from_coordinator(url).await?
+            } else {
+                load_config(&config)?
+            };
             config.force_cpu = cpu || config.gpu_device < 0;
             run_training_loop(config).await?;
         }
@@ -197,6 +204,46 @@ fn load_config(path: &str) -> Result<NodeConfig> {
     toml::from_str(&text).context("Failed to parse node config TOML")
 }
 
+async fn build_config_from_coordinator(url: &str) -> Result<NodeConfig> {
+    info!("Auto-discovering config from coordinator: {url}");
+    let client = client::CoordinatorClient::new(url);
+    let auto_config = client.get_config().await
+        .context("Failed to fetch auto-config from coordinator")?;
+
+    info!(
+        "Got config: coordinator v{}, bucket={}, training lr={:.2e}",
+        auto_config.coordinator_version,
+        auto_config.storage.bucket,
+        auto_config.training_params.lr_max,
+    );
+
+    let storage = StorageConfig {
+        endpoint: auto_config.storage.endpoint,
+        bucket: auto_config.storage.bucket,
+        access_key_id: auto_config.storage.access_key_id,
+        secret_access_key: auto_config.storage.secret_access_key,
+        region: auto_config.storage.region,
+    };
+
+    Ok(NodeConfig {
+        coordinator_url: url.to_string(),
+        api_key: String::new(),
+        storage,
+        gpu_device: 0,
+        target_push_interval_secs: auto_config.training_params.target_push_interval_secs,
+        min_inner_steps: auto_config.training_params.min_inner_steps,
+        max_inner_steps: auto_config.training_params.max_inner_steps,
+        cache_dir: "~/.distrain/cache".to_string(),
+        max_cache_gb: 100,
+        batch_size: auto_config.training_params.batch_size,
+        seq_len: auto_config.training_params.seq_len,
+        training_params: Some(auto_config.training_params),
+        max_memory_fraction: 0.80,
+        force_batch_size: None,
+        force_cpu: false,
+    })
+}
+
 async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     let coordinator = client::CoordinatorClient::new(&config.coordinator_url);
     let storage = Storage::new(&config.storage).await?;
@@ -212,8 +259,64 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         None
     };
 
+    // Phase 1: Quick GPU probe — used for hardware profile + early adapter check.
+    // No model loading, no calibration. Actual backend + H_mini computed in Phase 2.
+    let gpu_verdict = if !config.force_cpu {
+        let verdict = trainer::probe_gpu().await;
+        match &verdict {
+            trainer::GpuVerdict::Available { name, .. } => {
+                info!("GPU adapter found: {name} — will benchmark in Phase 2");
+            }
+            trainer::GpuVerdict::NoAdapter => {
+                info!("No GPU adapter — will use CPU");
+                config.force_cpu = true;
+            }
+        }
+        Some(verdict)
+    } else {
+        None
+    };
+
+    // Build hardware profile from GPU probe + system info
+    let hardware_profile = {
+        use distrain_shared::types::{DeviceType, HardwareProfile};
+        let sys = sysinfo::System::new_all();
+        let cpu_cores = sys.cpus().len() as u32;
+        let total_mem = sys.total_memory();
+        let ram_mb = total_mem / (1024 * 1024);
+
+        match &gpu_verdict {
+            Some(trainer::GpuVerdict::Available { name, is_integrated, vram_mb, .. }) => {
+                let device_type = if *is_integrated { DeviceType::IntegratedGpu } else { DeviceType::DiscreteGpu };
+                HardwareProfile {
+                    gpu_model: name.clone(),
+                    vram_mb: vram_mb.unwrap_or(0),
+                    device_type,
+                    cpu_cores,
+                    ram_mb,
+                    measured_step_time_secs: None,
+                }
+            }
+            _ => {
+                HardwareProfile {
+                    gpu_model: "none".to_string(),
+                    vram_mb: 0,
+                    device_type: DeviceType::Cpu,
+                    cpu_cores,
+                    ram_mb,
+                    measured_step_time_secs: None,
+                }
+            }
+        }
+    };
+    info!(
+        "Hardware profile: {} ({:?}, {} MiB VRAM, {} cores, {} MiB RAM)",
+        hardware_profile.gpu_model, hardware_profile.device_type,
+        hardware_profile.vram_mb, hardware_profile.cpu_cores, hardware_profile.ram_mb,
+    );
+
     // Register
-    let reg = coordinator.register(&config, persistent_id).await?;
+    let reg = coordinator.register(&config, persistent_id, Some(hardware_profile)).await?;
     info!("Registered as {} (api_key starts with {}...)", reg.node_id, &reg.api_key[..8]);
 
     // Persist the node ID for reuse across restarts
@@ -233,21 +336,8 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     let node_id = reg.node_id.0;
     let mut seq_num: u64 = 0;
 
-    // Phase 1: Just check if a GPU adapter exists. No model loading, no calibration.
-    // Actual backend selection + H_mini computed from real model in Phase 2.
-    let mut h_mini: u64 = config.min_inner_steps; // temporary, overridden by coordinator params below
-    if !config.force_cpu {
-        let verdict = trainer::probe_gpu().await;
-        match verdict {
-            trainer::GpuVerdict::Available { name, .. } => {
-                info!("GPU adapter found: {name} — will benchmark in Phase 2");
-            }
-            trainer::GpuVerdict::NoAdapter => {
-                info!("No GPU adapter — will use CPU");
-                config.force_cpu = true;
-            }
-        }
-    }
+    // H_mini temporary value — overridden by coordinator params below
+    let mut h_mini: u64 = config.min_inner_steps;
 
     // Cache dir
     let cache_dir = shellexpand::tilde(&config.cache_dir).to_string();
@@ -290,6 +380,8 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     // Whether the last round was aborted due to memory pressure.
     let mut memory_pressure_abort = false;
     // Measured upload bandwidth (bytes/sec), used for bandwidth-aware top-k adaptation.
+    // Updated from shared Arc after awaiting background upload.
+    #[allow(unused_variables, unused_assignments)]
     let mut measured_upload_bps: Option<f64> = None;
     // Persistent error buffer for compression error feedback across rounds.
     let mut error_buffer = distrain_model::compression::ErrorBuffer::new();
@@ -307,7 +399,22 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     // Track checkpoint version to clear error buffer on version change
     let mut last_trained_version: Option<u64> = None;
 
+    // GPU pipeline: overlap upload with next training round
+    let mut pending_upload: Option<tokio::task::JoinHandle<Result<()>>> = None;
+    // Shared measured upload bandwidth — written by background upload task, read by main loop
+    let measured_upload_bps_shared = std::sync::Arc::new(std::sync::Mutex::new(None::<f64>));
+
     loop {
+        // Await previous background upload before starting new round
+        if let Some(handle) = pending_upload.take() {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Previous delta upload failed: {e}"),
+                Err(e) => warn!("Previous upload task panicked: {e}"),
+            }
+            // Sync measured bandwidth from background task
+            measured_upload_bps = *measured_upload_bps_shared.lock().unwrap();
+        }
         // Dynamic shard reduction: if previous round hit memory pressure, halve shards
         if memory_pressure_abort {
             let prev = shards_per_node;
@@ -410,11 +517,24 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             let model_weight_bytes = model_config.param_count() as u64 * 2;
 
             let mut use_gpu = false;
+            let mut gpu_vram_mb: Option<u64> = None;
 
             if !config.force_cpu {
                 let verdict = trainer::probe_gpu().await;
                 match verdict {
-                    trainer::GpuVerdict::Available { name, is_integrated, max_buffer_size, .. } => {
+                    trainer::GpuVerdict::Available { name, is_integrated, max_buffer_size, vram_mb, .. } => {
+                        gpu_vram_mb = vram_mb;
+
+                        // VRAM threshold check for CUDA GPUs with known VRAM
+                        if let Some(vram) = vram_mb {
+                            if vram < trainer::MIN_VRAM_MB {
+                                warn!(
+                                    "GPU '{name}' has {vram} MiB VRAM (minimum {} MiB) — using CPU",
+                                    trainer::MIN_VRAM_MB,
+                                );
+                            }
+                        }
+
                         // Integrated GPU check: need buffer large enough to hold model weights.
                         // Apple Silicon (19GB+) passes easily. Intel Iris (2GB) fails.
                         // Use 4× model weight size as threshold — accounts for model + optimizer
@@ -432,7 +552,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                                 );
                             }
                         }
-                        if is_integrated && max_buffer_size < model_weight_bytes * 4 {
+                        if vram_mb.map_or(false, |v| v < trainer::MIN_VRAM_MB) {
+                            // VRAM below minimum threshold — skip GPU
+                        } else if is_integrated && max_buffer_size < model_weight_bytes * 4 {
                             // skip
                         } else if max_buffer_size < model_weight_bytes {
                             info!(
@@ -457,22 +579,50 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                 h_mini = min_h; // will be refined from first round timing
                 info!("Forced batch_size={forced_bs} (skipping calibration), grad_accum={grad_accum_steps}");
             } else if use_gpu {
-                info!("Calibrating GPU batch_size and timing (subprocess)...");
-                let (cal_bs, cal_accum, cal_sps) = trainer::calibrate_batch_size(
-                    &ckpt_path, config.seq_len, true, effective_batch_size,
-                ).await;
-
-                if cal_bs == 0 {
-                    warn!("GPU batch_size calibration failed, falling back to CPU");
-                    use_gpu = false;
-                } else {
-                    batch_size = cal_bs;
-                    grad_accum_steps = cal_accum;
+                // If we have VRAM info (CUDA), estimate batch size directly — avoids
+                // expensive subprocess probing. Fall back to subprocess if VRAM unknown.
+                if let Some(vram) = gpu_vram_mb {
+                    let estimated_bs = trainer::estimate_batch_size_from_vram(
+                        vram, model_weight_bytes, config.seq_len,
+                    );
+                    // Clamp to effective_batch_size
+                    let bs = estimated_bs.min(effective_batch_size).max(1);
+                    let accum = effective_batch_size / bs;
+                    info!(
+                        "VRAM-based batch estimate: {vram} MiB VRAM → batch_size={bs}, grad_accum={}",
+                        accum.max(1),
+                    );
+                    batch_size = bs;
+                    grad_accum_steps = accum.max(1);
                     batch_calibrated = true;
+                    // Still need subprocess for timing (secs_per_step), so run stress test
+                    info!("Running GPU timing benchmark (subprocess)...");
+                    let (_, _, cal_sps) = trainer::calibrate_batch_size(
+                        &ckpt_path, config.seq_len, true, effective_batch_size,
+                    ).await;
                     if let Some(sps) = cal_sps {
                         gpu_secs_per_step = Some(sps);
                         h_mini = ((target_interval / sps) as u64).clamp(min_h, max_h);
-                        info!("GPU calibrated: batch_size={batch_size}, grad_accum={grad_accum_steps}, {sps:.3}s/step, H_mini={h_mini}");
+                        info!("GPU timing: {sps:.3}s/step, H_mini={h_mini}");
+                    }
+                } else {
+                    info!("Calibrating GPU batch_size and timing (subprocess)...");
+                    let (cal_bs, cal_accum, cal_sps) = trainer::calibrate_batch_size(
+                        &ckpt_path, config.seq_len, true, effective_batch_size,
+                    ).await;
+
+                    if cal_bs == 0 {
+                        warn!("GPU batch_size calibration failed, falling back to CPU");
+                        use_gpu = false;
+                    } else {
+                        batch_size = cal_bs;
+                        grad_accum_steps = cal_accum;
+                        batch_calibrated = true;
+                        if let Some(sps) = cal_sps {
+                            gpu_secs_per_step = Some(sps);
+                            h_mini = ((target_interval / sps) as u64).clamp(min_h, max_h);
+                            info!("GPU calibrated: batch_size={batch_size}, grad_accum={grad_accum_steps}, {sps:.3}s/step, H_mini={h_mini}");
+                        }
                     }
                 }
             }
@@ -512,16 +662,32 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             &shard_ids[..shard_ids.len().min(5)],
         );
 
-        // Load assigned shards (cached locally, only downloads new ones)
-        let mut data_loader = data::DataLoader::from_assignment(
-            &storage, &manifest, &data_cache, &shard_ids,
-            config.seq_len, batch_size,
+        // Resolve shard filenames from manifest indices
+        let shard_names: Vec<String> = shard_ids
+            .iter()
+            .filter_map(|&idx| manifest.shards.get(idx).map(|e| e.filename.clone()))
+            .collect();
+
+        // Streaming data loader: downloads first few shards, starts training immediately.
+        // Remaining shards downloaded on demand as training consumes data.
+        let max_loaded_shards = 5;
+        let mut streaming_loader = data::StreamingDataLoader::new(
+            storage.clone(),
+            shard_names,
+            data_cache.clone(),
+            config.seq_len,
+            max_loaded_shards,
         ).await?;
 
         // Seek to a different position each round so re-training the same checkpoint
         // version doesn't produce identical batches.
-        data_loader.seek_by_seed(seq_num);
-        info!("Data loaded: {} tokens from {} assigned shards", data_loader.total_tokens(), shard_ids.len());
+        streaming_loader.seek_by_seed(seq_num);
+        info!(
+            "Data loaded (streaming): {} tokens from {}/{} shards (rest on demand)",
+            streaming_loader.total_tokens_available(),
+            streaming_loader.shards_loaded(),
+            streaming_loader.total_shards(),
+        );
         resources::log_memory("after shard loading");
 
         // No mid-round checkpoint polling. Train the full round, push, then check
@@ -531,6 +697,10 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         // Train H_mini steps
         seq_num += 1;
         let delta_path = cache_dir.join(format!("delta_{node_id}_{seq_num}.delta.zst"));
+
+        // Create a DataLoader snapshot from the streaming loader's currently loaded shards.
+        // The trainer functions expect &mut DataLoader, so we bridge here.
+        let mut data_loader = streaming_loader.to_data_loader(batch_size)?;
 
         // GPU path: use watchdog. CPU path: direct call (no driver hang risk).
         let max_mem_fraction = config.max_memory_fraction;
@@ -612,22 +782,35 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                         );
                         continue;
                     }
-                    warn!(
-                        "GPU hung during training (timeout {timeout_secs:.0}s) — falling back to CPU permanently"
+                    // No force_batch_size — refuse silent CPU fallback
+                    error!(
+                        "GPU hung during training (timeout {timeout_secs:.0}s). \
+                         This is a fatal error — a GPU node should not silently fall back to CPU. \
+                         Check your GPU driver and VRAM. Use --cpu to explicitly request CPU training."
                     );
-                    config.force_cpu = true;
-                    h_mini = min_h;
-                    // Re-calibrate batch_size for CPU
-                    let (cal_bs, cal_accum, _) = trainer::calibrate_batch_size(
-                        &ckpt_path, config.seq_len, false, effective_batch_size,
-                    ).await;
-                    batch_size = cal_bs.max(1);
-                    grad_accum_steps = cal_accum;
-                    info!("Falling back to CPU — H_mini={h_mini}, batch_size={batch_size}, grad_accum={grad_accum_steps}");
-                    continue; // Retry same checkpoint on CPU
+                    return Err(anyhow::anyhow!("GPU training failed (hung, timeout {timeout_secs:.0}s), refusing silent CPU fallback"));
                 }
                 Err(trainer::TrainingFailure::GpuPanic { message }) => {
-                    // OOM recovery: halve batch_size, double grad_accum
+                    if config.force_batch_size.is_some() {
+                        // OOM recovery with force_batch_size: halve batch_size, double grad_accum
+                        if batch_size > 1 {
+                            let old_bs = batch_size;
+                            batch_size /= 2;
+                            grad_accum_steps = effective_batch_size / batch_size;
+                            warn!(
+                                "GPU panic at batch_size={old_bs}: {message} — recovering to batch_size={batch_size}, grad_accum={grad_accum_steps}"
+                            );
+                            continue; // Retry round with smaller batch
+                        }
+                        // batch_size=1 and still failing with force_batch_size — fatal
+                        error!(
+                            "GPU panicked at batch_size=1 even with force_batch_size: {message}. \
+                             This is a fatal error — check your GPU driver and VRAM. \
+                             Use --cpu to explicitly request CPU training."
+                        );
+                        return Err(anyhow::anyhow!("GPU training failed (panic at batch_size=1), refusing silent CPU fallback"));
+                    }
+                    // OOM recovery without force_batch_size: try halving first
                     if batch_size > 1 {
                         let old_bs = batch_size;
                         batch_size /= 2;
@@ -637,19 +820,13 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                         );
                         continue; // Retry round with smaller batch
                     }
-                    // batch_size=1 and still failing — fall back to CPU
-                    warn!(
-                        "GPU panicked at batch_size=1: {message} — falling back to CPU permanently"
+                    // batch_size=1 and still failing — refuse silent CPU fallback
+                    error!(
+                        "GPU panicked at batch_size=1: {message}. \
+                         This is a fatal error — a GPU node should not silently fall back to CPU. \
+                         Check your GPU driver and VRAM. Use --cpu to explicitly request CPU training."
                     );
-                    config.force_cpu = true;
-                    h_mini = min_h;
-                    let (cal_bs, cal_accum, _) = trainer::calibrate_batch_size(
-                        &ckpt_path, config.seq_len, false, effective_batch_size,
-                    ).await;
-                    batch_size = cal_bs.max(1);
-                    grad_accum_steps = cal_accum;
-                    info!("Falling back to CPU — H_mini={h_mini}, batch_size={batch_size}, grad_accum={grad_accum_steps}");
-                    continue; // Retry same checkpoint on CPU
+                    return Err(anyhow::anyhow!("GPU training failed (panic at batch_size=1), refusing silent CPU fallback"));
                 }
                 Err(trainer::TrainingFailure::Other(e)) => Err(e),
             }
@@ -718,6 +895,12 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         last_trained_version = Some(version);
         result_elapsed = result.elapsed_secs;
 
+        // Pipeline: evict consumed shards and download next ones while we handle the result.
+        // This ensures fresh shard data is ready for the next round.
+        if let Err(e) = streaming_loader.ensure_next_shard().await {
+            warn!("Failed to stream next shard (non-fatal, will retry next round): {e:#}");
+        }
+
         // Phase 2: skip warmup after first round (model is already warm)
         if let Some(ref mut tp) = config.training_params {
             if tp.warmup_fraction > 0.0 {
@@ -776,43 +959,11 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             }
         }
 
-        // Upload delta to R2 (retry with exponential backoff, measure bandwidth)
+        // GPU pipeline: spawn upload+push in background, continue to next round immediately.
+        // All data needed by the background task is cloned/moved here.
         let delta_key =
             distrain_shared::paths::delta_path(version, &node_id, seq_num);
-        let delta_file_size = tokio::fs::metadata(&delta_path).await.map(|m| m.len()).unwrap_or(0);
-        let upload_start = std::time::Instant::now();
-        let mut upload_ok = false;
-        for attempt in 1..=5 {
-            match storage.upload_from_file(&delta_key, &delta_path).await {
-                Ok(()) => {
-                    upload_ok = true;
-                    let upload_secs = upload_start.elapsed().as_secs_f64();
-                    if upload_secs > 0.1 && delta_file_size > 0 {
-                        let bps = delta_file_size as f64 / upload_secs;
-                        measured_upload_bps = Some(bps);
-                        info!("Upload: {:.1}MB in {upload_secs:.1}s ({:.1} MB/s)",
-                            delta_file_size as f64 / 1e6, bps / 1e6);
-                    }
-                    break;
-                }
-                Err(e) => {
-                    warn!("Delta upload failed (attempt {attempt}/5): {e:#}");
-                    if attempt < 5 {
-                        let backoff = std::time::Duration::from_secs(2u64.pow(attempt));
-                        info!("Retrying upload in {}s...", backoff.as_secs());
-                        tokio::time::sleep(backoff).await;
-                    }
-                }
-            }
-        }
-        if !upload_ok {
-            warn!("Failed to upload delta after 5 attempts, skipping push");
-            let _ = tokio::fs::remove_file(&delta_path).await;
-            continue;
-        }
-
-        // Push metadata to coordinator (retry with exponential backoff)
-        let push = distrain_shared::types::DeltaPush {
+        let push_body = distrain_shared::types::DeltaPush {
             node_id: distrain_shared::types::NodeId(node_id.clone()),
             seq_num,
             checkpoint_version: version,
@@ -826,78 +977,134 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             sparse_norm: result.compression_stats.as_ref().map(|s| s.sparse_norm),
         };
 
-        let mut push_ok = false;
-        for attempt in 1..=5 {
-            match coordinator.push_delta(&push).await {
-                Ok(resp) => {
-                    if resp.accepted {
-                        info!("Push accepted (ckpt v{})", resp.checkpoint_version);
-                    } else {
-                        info!(
-                            "Push rejected: {}",
-                            resp.reason.unwrap_or_else(|| "unknown".to_string())
-                        );
-                    }
-                    push_ok = true;
-                    break;
-                }
-                Err(e) => {
-                    warn!("Push to coordinator failed (attempt {attempt}/5): {e:#}");
-                    if attempt < 5 {
-                        let backoff = std::time::Duration::from_secs(2u64.pow(attempt));
-                        info!("Retrying push in {}s...", backoff.as_secs());
-                        tokio::time::sleep(backoff).await;
-                    }
-                }
-            }
-        }
-        if !push_ok {
-            warn!("Failed to push delta after 5 attempts, continuing to next round");
-        }
-
-        // Append per-round metrics to local JSONL (best-effort, for paper analysis)
-        {
-            use tokio::io::AsyncWriteExt;
-            let metrics_path = cache_dir.join("node_metrics.jsonl");
-            let timestamp = std::time::SystemTime::now()
+        // Build metrics entry now (captures current values before they change next round)
+        let metrics_entry = serde_json::json!({
+            "timestamp": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs();
-            let entry = serde_json::json!({
-                "timestamp": timestamp,
-                "node_id": &node_id,
-                "seq": seq_num,
-                "version": version,
-                "steps": result.steps_completed,
-                "loss": result.final_loss,
-                "tokens": result.tokens_processed,
-                "secs": result.elapsed_secs,
-                "h_mini": h_mini,
-                "batch_size": result.batch_size,
-                "compressed_bytes": result.compression_stats.as_ref().map(|s| s.compressed_bytes),
-                "raw_bytes": result.compression_stats.as_ref().map(|s| s.raw_param_bytes),
-                "retention": result.compression_stats.as_ref().map(|s| s.retention_ratio),
-                "top_k": result.compression_stats.as_ref().map(|s| s.top_k_fraction),
-                "dense_norm": result.compression_stats.as_ref().map(|s| s.dense_norm),
-                "sparse_norm": result.compression_stats.as_ref().map(|s| s.sparse_norm),
-            });
-            if let Ok(line) = serde_json::to_string(&entry) {
-                if let Ok(mut f) = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&metrics_path)
-                    .await
-                {
-                    let _ = f.write_all(format!("{line}\n").as_bytes()).await;
+                .as_secs(),
+            "node_id": &node_id,
+            "seq": seq_num,
+            "version": version,
+            "steps": result.steps_completed,
+            "loss": result.final_loss,
+            "tokens": result.tokens_processed,
+            "secs": result.elapsed_secs,
+            "h_mini": h_mini,
+            "batch_size": result.batch_size,
+            "compressed_bytes": result.compression_stats.as_ref().map(|s| s.compressed_bytes),
+            "raw_bytes": result.compression_stats.as_ref().map(|s| s.raw_param_bytes),
+            "retention": result.compression_stats.as_ref().map(|s| s.retention_ratio),
+            "top_k": result.compression_stats.as_ref().map(|s| s.top_k_fraction),
+            "dense_norm": result.compression_stats.as_ref().map(|s| s.dense_norm),
+            "sparse_norm": result.compression_stats.as_ref().map(|s| s.sparse_norm),
+        });
+
+        let storage_bg = storage.clone();
+        let coordinator_bg = coordinator.clone();
+        let delta_path_bg = delta_path.clone();
+        let metrics_path_bg = cache_dir.join("node_metrics.jsonl");
+        let cache_dir_bg = cache_dir.clone();
+        let bps_shared = measured_upload_bps_shared.clone();
+
+        pending_upload = Some(tokio::spawn(async move {
+            // Upload delta to R2 (retry with exponential backoff, measure bandwidth)
+            let delta_file_size = tokio::fs::metadata(&delta_path_bg).await.map(|m| m.len()).unwrap_or(0);
+            let upload_start = std::time::Instant::now();
+            let mut upload_ok = false;
+            for attempt in 1..=5u32 {
+                match storage_bg.upload_from_file(&delta_key, &delta_path_bg).await {
+                    Ok(()) => {
+                        upload_ok = true;
+                        let upload_secs = upload_start.elapsed().as_secs_f64();
+                        if upload_secs > 0.1 && delta_file_size > 0 {
+                            let bps = delta_file_size as f64 / upload_secs;
+                            *bps_shared.lock().unwrap() = Some(bps);
+                            info!("Upload: {:.1}MB in {upload_secs:.1}s ({:.1} MB/s)",
+                                delta_file_size as f64 / 1e6, bps / 1e6);
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Delta upload failed (attempt {attempt}/5): {e:#}");
+                        if attempt < 5 {
+                            let backoff = std::time::Duration::from_secs(2u64.pow(attempt));
+                            info!("Retrying upload in {}s...", backoff.as_secs());
+                            tokio::time::sleep(backoff).await;
+                        }
+                    }
                 }
             }
+            if !upload_ok {
+                warn!("Failed to upload delta after 5 attempts, skipping push");
+                let _ = tokio::fs::remove_file(&delta_path_bg).await;
+                return Ok(());
+            }
+
+            // Push metadata to coordinator (retry with exponential backoff)
+            let mut push_ok = false;
+            for attempt in 1..=5u32 {
+                match coordinator_bg.push_delta(&push_body).await {
+                    Ok(resp) => {
+                        if resp.accepted {
+                            info!("Push accepted (ckpt v{})", resp.checkpoint_version);
+                        } else {
+                            info!(
+                                "Push rejected: {}",
+                                resp.reason.unwrap_or_else(|| "unknown".to_string())
+                            );
+                        }
+                        push_ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Push to coordinator failed (attempt {attempt}/5): {e:#}");
+                        if attempt < 5 {
+                            let backoff = std::time::Duration::from_secs(2u64.pow(attempt));
+                            info!("Retrying push in {}s...", backoff.as_secs());
+                            tokio::time::sleep(backoff).await;
+                        }
+                    }
+                }
+            }
+            if !push_ok {
+                warn!("Failed to push delta after 5 attempts, continuing");
+            }
+
+            // Append per-round metrics to local JSONL (best-effort, for paper analysis)
+            {
+                use tokio::io::AsyncWriteExt;
+                if let Ok(line) = serde_json::to_string(&metrics_entry) {
+                    if let Ok(mut f) = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&metrics_path_bg)
+                        .await
+                    {
+                        let _ = f.write_all(format!("{line}\n").as_bytes()).await;
+                    }
+                }
+            }
+
+            // Cleanup delta file
+            let _ = tokio::fs::remove_file(&delta_path_bg).await;
+
+            // Housekeeping: keep only the 3 most recent checkpoints in cache
+            cleanup_old_checkpoints(&cache_dir_bg, 3).await;
+
+            Ok(())
+        }));
+
+        // Continue immediately to next round — upload proceeds in background
+    }
+
+    // Await any pending upload before exiting (unreachable in practice — loop never breaks)
+    #[allow(unreachable_code)]
+    {
+        if let Some(handle) = pending_upload.take() {
+            let _ = handle.await;
         }
-
-        // Cleanup delta file
-        let _ = tokio::fs::remove_file(&delta_path).await;
-
-        // Housekeeping: keep only the 3 most recent checkpoints in cache
-        cleanup_old_checkpoints(&cache_dir, 3).await;
+        Ok(())
     }
 }
 
@@ -1116,7 +1323,7 @@ async fn show_config(config: &NodeConfig) -> Result<()> {
 
     // Try to fetch from coordinator
     let coordinator = client::CoordinatorClient::new(&config.coordinator_url);
-    match coordinator.register(config, None).await {
+    match coordinator.register(config, None, None).await {
         Ok(reg) => {
             if let Some(remote) = reg.training_params {
                 println!("\nCoordinator training params:");

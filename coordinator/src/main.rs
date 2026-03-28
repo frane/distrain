@@ -45,6 +45,10 @@ async fn main() -> Result<()> {
         "Outer LR: initial={}, loss-based scheduling (vocab_size={}, ln_vocab={:.2})",
         config.outer_lr, config.vocab_size, (config.vocab_size as f64).ln()
     );
+    info!(
+        "Checkpoint trigger: min_contributions={}, min_weight={:.2}",
+        config.min_contributions, config.min_weight
+    );
 
     let storage = Storage::new(&config.storage).await?;
     storage.ensure_bucket().await?;
@@ -113,6 +117,9 @@ fn load_config() -> CoordinatorConfig {
     }
     if let Ok(v) = std::env::var("VOCAB_SIZE") {
         config.vocab_size = v.parse().unwrap_or(32768);
+    }
+    if let Ok(v) = std::env::var("MIN_WEIGHT") {
+        config.min_weight = v.parse().unwrap_or(1.5);
     }
 
     config

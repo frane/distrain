@@ -26,6 +26,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/upload/*key", put(upload_to_storage))
         .route("/download/*key", get(download_from_storage))
         .route("/checkpoint/latest", get(get_latest_checkpoint))
+        .route("/config", get(get_config))
         .route("/status", get(get_status))
         .route("/heartbeat", post(heartbeat))
         .route("/health", get(health))
@@ -78,6 +79,13 @@ async fn register_node(
     }
 
     info!("Registered node: {}", node_id);
+
+    if let Some(ref hw) = req.hardware {
+        info!(
+            "Node {} hardware: {} ({:?}, {} MiB VRAM, {} cores, {} MiB RAM)",
+            node_id, hw.gpu_model, hw.device_type, hw.vram_mb, hw.cpu_cores, hw.ram_mb
+        );
+    }
 
     (
         StatusCode::OK,
@@ -221,12 +229,13 @@ async fn push_delta(
     );
 
     // Check if we should produce a checkpoint (with lock to prevent concurrent aggregations)
-    let should_ckpt = state::should_checkpoint(&acc, dynamic_min);
+    let should_ckpt = state::should_checkpoint(&acc, dynamic_min, app.config.min_weight);
     let agg_in_progress = app.aggregation_in_progress.load(Ordering::SeqCst);
     if accepted {
+        let total_weight: f64 = acc.contributions.iter().map(|c| c.weight).sum();
         info!(
-            "Checkpoint check: contributions={}, dynamic_min={}, should_checkpoint={}, agg_in_progress={}",
-            acc.contributions.len(), dynamic_min, should_ckpt, agg_in_progress,
+            "Checkpoint check: contributions={}, dynamic_min={}, total_weight={:.2}, min_weight={:.2}, should_checkpoint={}, agg_in_progress={}",
+            acc.contributions.len(), dynamic_min, total_weight, app.config.min_weight, should_ckpt, agg_in_progress,
         );
     }
     if accepted && should_ckpt && !agg_in_progress
@@ -346,6 +355,23 @@ async fn get_latest_checkpoint(State(app): State<Arc<AppState>>) -> impl IntoRes
     };
 
     Json(info)
+}
+
+/// GET /config — auto-discovery: returns everything a node needs to join.
+async fn get_config(State(app): State<Arc<AppState>>) -> impl IntoResponse {
+    let auto_config = NodeAutoConfig {
+        storage: StorageConfigPublic {
+            endpoint: app.config.storage.endpoint.clone(),
+            bucket: app.config.storage.bucket.clone(),
+            access_key_id: app.config.storage.access_key_id.clone(),
+            secret_access_key: app.config.storage.secret_access_key.clone(),
+            region: app.config.storage.region.clone(),
+        },
+        training_params: TrainingParams::default(),
+        coordinator_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+
+    Json(auto_config)
 }
 
 /// GET /status — public training status.

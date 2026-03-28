@@ -130,7 +130,7 @@ async fn run_training_loop(state: Arc<AppState>, mut config: NodeConfig) -> anyh
     let storage = Storage::new(&config.storage).await?;
 
     // Register (desktop doesn't persist node ID yet)
-    let reg = coordinator.register(&config, None).await?;
+    let reg = coordinator.register(&config, None, None).await?;
     let node_id = reg.node_id.0.clone();
     push_log(&state, format!("Registered as {node_id}")).await;
 

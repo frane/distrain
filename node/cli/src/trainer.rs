@@ -141,9 +141,32 @@ pub enum GpuVerdict {
         is_integrated: bool,
         max_buffer_size: u64,
         backend_type: GpuBackendType,
+        /// Total VRAM in MiB (known for CUDA GPUs via nvidia-smi, None for wgpu).
+        vram_mb: Option<u64>,
     },
     /// No GPU adapter found at all — use CPU.
     NoAdapter,
+}
+
+/// Minimum VRAM (in MiB) required for GPU training. GPUs below this threshold
+/// should fall back to CPU. 4 GiB = 4096 MiB.
+pub const MIN_VRAM_MB: u64 = 4096;
+
+/// Estimate maximum batch size from known VRAM.
+///
+/// Uses a conservative model: weights (BF16) + optimizer (FP32 x2) + gradients (BF16)
+/// require roughly 5x the raw weight bytes. The remaining VRAM is split among
+/// activation memory for each batch item.
+///
+/// Returns a batch size in [1, 16].
+pub fn estimate_batch_size_from_vram(vram_mb: u64, model_weight_bytes: u64, seq_len: usize) -> usize {
+    // Model needs: weights (BF16) + optimizer (FP32 x2) + gradients (BF16) ≈ 5x weight bytes
+    let model_overhead = model_weight_bytes * 5;
+    // Rough activation memory per batch item
+    let activation_per_item = (seq_len * 4 * 1024) as u64; // rough estimate
+    let available = (vram_mb * 1024 * 1024).saturating_sub(model_overhead);
+    let max_batch = (available / activation_per_item.max(1)).max(1) as usize;
+    max_batch.min(16) // cap at 16
 }
 
 /// Probe for a GPU adapter. Tries CUDA first (if compiled in), then wgpu, then gives up.
@@ -160,13 +183,31 @@ pub async fn probe_gpu() -> GpuVerdict {
             if output.status.success() {
                 let info = String::from_utf8_lossy(&output.stdout);
                 let name = info.trim().split(',').next().unwrap_or("NVIDIA GPU").trim().to_string();
-                info!("CUDA GPU detected: {name}");
+
+                // Parse VRAM from nvidia-smi (second CSV field is "memory.total [MiB]")
+                let vram_mb = info.trim().split(',').nth(1)
+                    .and_then(|s| {
+                        // nvidia-smi returns e.g. " 8192 MiB" — strip unit and whitespace
+                        let cleaned = s.trim().replace(" MiB", "").replace(" MB", "");
+                        cleaned.parse::<u64>().ok()
+                    });
+
+                if let Some(vram) = vram_mb {
+                    info!("CUDA GPU detected: {name} ({vram} MiB VRAM)");
+                    if vram < MIN_VRAM_MB {
+                        warn!("CUDA GPU '{name}' has only {vram} MiB VRAM (minimum {MIN_VRAM_MB} MiB) — will likely fail for training");
+                    }
+                } else {
+                    info!("CUDA GPU detected: {name} (VRAM unknown)");
+                }
+
                 return GpuVerdict::Available {
                     name,
                     backend: "CUDA".to_string(),
                     is_integrated: false,
                     max_buffer_size: u64::MAX,
                     backend_type: GpuBackendType::Cuda,
+                    vram_mb,
                 };
             }
         }
@@ -193,7 +234,7 @@ pub async fn probe_gpu() -> GpuVerdict {
                 "GPU detected: {name} (vendor={}, type={:?}, backend={backend}, max_buffer={}MB)",
                 gpu_info.vendor, gpu_info.device_type, max_buffer_size / (1024 * 1024),
             );
-            GpuVerdict::Available { name, backend, is_integrated, max_buffer_size, backend_type: GpuBackendType::Wgpu }
+            GpuVerdict::Available { name, backend, is_integrated, max_buffer_size, backend_type: GpuBackendType::Wgpu, vram_mb: None }
         }
         Err(e) => {
             info!("No GPU adapter found: {e}");

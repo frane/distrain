@@ -22,12 +22,18 @@ impl CoordinatorClient {
     }
 
     /// Register this node with the coordinator.
-    pub async fn register(&self, _config: &NodeConfig, persistent_node_id: Option<String>) -> Result<RegisterResponse> {
+    pub async fn register(
+        &self,
+        _config: &NodeConfig,
+        persistent_node_id: Option<String>,
+        hardware: Option<HardwareProfile>,
+    ) -> Result<RegisterResponse> {
         let req = RegisterRequest {
-            gpu_model: "auto-detected".to_string(),
-            gpu_memory_gb: 0.0,
+            gpu_model: hardware.as_ref().map(|h| h.gpu_model.clone()).unwrap_or_else(|| "auto-detected".to_string()),
+            gpu_memory_gb: hardware.as_ref().map(|h| h.vram_mb as f64 / 1024.0).unwrap_or(0.0),
             bandwidth_mbps: 0.0,
             node_id: persistent_node_id,
+            hardware,
         };
 
         let resp = self
@@ -123,6 +129,20 @@ impl CoordinatorClient {
             .context("Failed to send heartbeat")?;
         resp.json::<HeartbeatResponse>()
             .context("Failed to parse heartbeat response")
+    }
+
+    /// Get auto-discovery config from coordinator.
+    pub async fn get_config(&self) -> Result<NodeAutoConfig> {
+        let resp = self
+            .http
+            .get(format!("{}/config", self.base_url))
+            .send()
+            .await
+            .context("Failed to get config from coordinator")?;
+
+        resp.json::<NodeAutoConfig>()
+            .await
+            .context("Failed to parse auto-config response")
     }
 
     /// Get training status.

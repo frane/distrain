@@ -39,6 +39,12 @@ pub struct CoordinatorConfig {
     pub outer_momentum: f64,
     pub keep_versions: u64,
     pub vocab_size: u32,
+    /// Minimum total contribution weight before a checkpoint can be produced.
+    /// Works alongside min_contributions: both must be satisfied.
+    /// Default 1.5 — a single strong node (weight ~2.0) can trigger, but a
+    /// single weak node (weight 0.5) cannot.
+    #[serde(default = "default_min_weight")]
+    pub min_weight: f64,
     /// Max storage in GB for coordinator (checkpoints + deltas + optimizer state).
     /// When exceeded, oldest versions are deleted. 0 = use keep_versions only.
     #[serde(default)]
@@ -58,6 +64,7 @@ impl Default for CoordinatorConfig {
             outer_momentum: 0.9,
             keep_versions: 10,
             vocab_size: 32768,
+            min_weight: default_min_weight(),
             max_storage_gb: 0,
         }
     }
@@ -90,6 +97,10 @@ pub struct NodeConfig {
     /// Force CPU backend (set via CLI --cpu flag, not from config file)
     #[serde(skip)]
     pub force_cpu: bool,
+}
+
+fn default_min_weight() -> f64 {
+    1.5
 }
 
 fn default_max_memory_fraction() -> f64 {

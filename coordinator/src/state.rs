@@ -118,8 +118,14 @@ pub fn apply_delta_push(
 }
 
 /// Check if the accumulator has enough contributions for a checkpoint.
-pub fn should_checkpoint(acc: &AccumulatorState, min_contributions: u64) -> bool {
-    acc.contributions.len() as u64 >= min_contributions
+/// Both conditions must be met:
+/// 1. Number of contributions >= min_contributions (hard floor)
+/// 2. Total contribution weight >= min_weight (quality gate)
+pub fn should_checkpoint(acc: &AccumulatorState, min_contributions: u64, min_weight: f64) -> bool {
+    let count_ok = acc.contributions.len() as u64 >= min_contributions;
+    let total_weight: f64 = acc.contributions.iter().map(|c| c.weight).sum();
+    let weight_ok = total_weight >= min_weight;
+    count_ok && weight_ok
 }
 
 /// Persistent coordinator state (survives restarts). Stored in R2.

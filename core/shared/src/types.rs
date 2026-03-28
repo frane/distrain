@@ -209,6 +209,33 @@ pub struct HeartbeatResponse {
     pub latest_version: Option<u64>,
 }
 
+/// Type of compute device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DeviceType {
+    DiscreteGpu,
+    IntegratedGpu,
+    Cpu,
+    Unknown,
+}
+
+impl Default for DeviceType {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+/// Hardware profile reported by a node at registration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HardwareProfile {
+    pub gpu_model: String,
+    pub vram_mb: u64,
+    pub device_type: DeviceType,
+    pub cpu_cores: u32,
+    pub ram_mb: u64,
+    #[serde(default)]
+    pub measured_step_time_secs: Option<f64>,
+}
+
 /// Node registration request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
@@ -218,6 +245,9 @@ pub struct RegisterRequest {
     /// Persistent node ID — reused across restarts to avoid ghost node inflation.
     #[serde(default)]
     pub node_id: Option<String>,
+    /// Detailed hardware profile for coordinator-side analytics.
+    #[serde(default)]
+    pub hardware: Option<HardwareProfile>,
 }
 
 /// Node registration response.
@@ -235,4 +265,22 @@ pub struct RegisterResponse {
     /// Canonical training hyperparameters from the coordinator.
     #[serde(default)]
     pub training_params: Option<TrainingParams>,
+}
+
+/// Auto-discovery response: everything a node needs to join the training run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeAutoConfig {
+    pub storage: StorageConfigPublic,
+    pub training_params: TrainingParams,
+    pub coordinator_version: String,
+}
+
+/// Public-facing storage configuration (returned by coordinator for auto-discovery).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfigPublic {
+    pub endpoint: String,
+    pub bucket: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub region: String,
 }
