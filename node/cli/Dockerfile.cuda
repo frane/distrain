@@ -15,11 +15,12 @@ COPY . .
 ENV CUDARC_CUDA_VERSION=12040
 RUN cargo build --release -p distrain-node --features cuda
 
-# Runtime — CUDA 12.4 with NVRTC (burn-cuda compiles kernels at runtime)
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# Runtime — CUDA 12.4 devel (cubecl compiles CUDA kernels at runtime via NVRTC,
+# needs full toolkit headers). Using devel instead of runtime/base for reliability.
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libvulkan1 openssh-server cuda-nvrtc-12-4 \
+    ca-certificates libvulkan1 openssh-server \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
 
