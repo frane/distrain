@@ -440,12 +440,12 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         // to old weights and no longer valid for the new checkpoint.
         if let Some(prev_v) = last_trained_version {
             if version != prev_v {
-                // Keep 80% of error buffer on checkpoint change. The accumulated
+                // Keep 90% of error buffer on checkpoint change. The accumulated
                 // error is valid gradient signal from prior training rounds.
-                info!("Checkpoint advanced v{prev_v} → v{version} — decaying error buffer 20%");
+                info!("Checkpoint advanced v{prev_v} → v{version} — decaying error buffer 10%");
                 for v in error_buffer.buffer.values_mut() {
                     for x in v.iter_mut() {
-                        *x *= 0.8;
+                        *x *= 0.9;
                     }
                 }
             }

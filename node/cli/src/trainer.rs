@@ -32,17 +32,18 @@ use distrain_model::{CpuBackend, CpuDevice, GpuBackend, GpuDevice};
 /// `raw_param_bytes`: total model parameter bytes (for computing top-k from budget).
 pub fn adaptive_top_k(loss: f64, max_delta_bytes: Option<u64>, raw_param_bytes: u64) -> f32 {
     // Loss-based target: keep as much gradient as possible.
-    // Higher retention = less information loss = closer to baseline convergence.
+    // At low loss, gradients are spread thin — need high retention to preserve signal.
+    // effective_signal = inner_lr × outer_lr × retention, must approach inner_lr for baseline parity.
     let loss_k = if loss > 20.0 {
-        0.40
-    } else if loss > 10.0 {
         0.50
-    } else if loss > 7.0 {
-        0.55
-    } else if loss > 5.0 {
+    } else if loss > 10.0 {
         0.60
+    } else if loss > 7.0 {
+        0.70
+    } else if loss > 5.0 {
+        0.75
     } else {
-        0.65
+        0.80
     };
 
     // Bandwidth cap: if we measured upload speed, limit top-k so delta fits
