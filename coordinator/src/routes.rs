@@ -80,11 +80,21 @@ async fn register_node(
 
     info!("Registered node: {}", node_id);
 
+    // Store hardware profile for capability-based checkpoint triggers
     if let Some(ref hw) = req.hardware {
         info!(
             "Node {} hardware: {} ({:?}, {} MiB VRAM, {} cores, {} MiB RAM)",
             node_id, hw.gpu_model, hw.device_type, hw.vram_mb, hw.cpu_cores, hw.ram_mb
         );
+        let mut coord_state = state::load_coordinator_state(&app.storage).await;
+        coord_state.node_profiles.insert(node_id.clone().0, state::NodeProfile {
+            device_type: hw.device_type.clone(),
+            vram_mb: hw.vram_mb,
+            gpu_model: hw.gpu_model.clone(),
+            round_time_secs: None,
+            tier: "unknown".to_string(),
+        });
+        let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
     }
 
     (
@@ -221,21 +231,47 @@ async fn push_delta(
 
     let mut current_version = acc.checkpoint_version;
 
-    // min_contributions: config value as hard floor, dynamic scales up with active nodes
-    let coord_state = state::load_coordinator_state(&app.storage).await;
+    // Load coordinator state for capability-based checkpoint trigger
+    let mut coord_state = state::load_coordinator_state(&app.storage).await;
+
+    // Update node's observed round time (from training_loss timestamp proxy: round_time ≈ inner_steps * step_time)
+    // We estimate from the push frequency: if we've seen this node before, compute time since last push
+    if accepted {
+        if let Some(profile) = coord_state.node_profiles.get_mut(&push.node_id.0) {
+            // Use heartbeat timestamp delta as round time estimate
+            if let Some(&last_seen) = coord_state.heartbeats.get(&push.node_id.0) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let elapsed = now.saturating_sub(last_seen) as f64;
+                if elapsed > 5.0 && elapsed < 600.0 { // reasonable range
+                    profile.round_time_secs = Some(elapsed);
+                    // Classify tier
+                    profile.tier = if elapsed < 120.0 { "fast".to_string() }
+                        else if elapsed < 600.0 { "slow".to_string() }
+                        else { "very_slow".to_string() };
+                }
+            }
+        }
+        let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
+    }
+
     let dynamic_min = std::cmp::max(
         app.config.min_contributions,
         std::cmp::max(1, (coord_state.active_nodes as f64 * 0.66).floor() as u64),
     );
 
-    // Check if we should produce a checkpoint (with lock to prevent concurrent aggregations)
-    let should_ckpt = state::should_checkpoint(&acc, dynamic_min, app.config.min_weight);
+    // Capability-based checkpoint trigger: waits for all fast nodes
+    let should_ckpt = state::should_checkpoint(&acc, dynamic_min, app.config.min_weight, &coord_state);
     let agg_in_progress = app.aggregation_in_progress.load(Ordering::SeqCst);
     if accepted {
         let total_weight: f64 = acc.contributions.iter().map(|c| c.weight).sum();
+        let fast_count = coord_state.node_profiles.values().filter(|p| p.tier == "fast" || p.tier == "unknown").count();
+        let contributing: Vec<&str> = acc.contributions.iter().map(|c| c.node_id.0.as_str()).collect();
         info!(
-            "Checkpoint check: contributions={}, dynamic_min={}, total_weight={:.2}, min_weight={:.2}, should_checkpoint={}, agg_in_progress={}",
-            acc.contributions.len(), dynamic_min, total_weight, app.config.min_weight, should_ckpt, agg_in_progress,
+            "Checkpoint check: contributions={}/{} fast nodes, total_weight={:.2}, should_checkpoint={}, contributors={:?}",
+            acc.contributions.len(), fast_count, total_weight, should_ckpt, contributing,
         );
     }
     if accepted && should_ckpt && !agg_in_progress

@@ -117,15 +117,81 @@ pub fn apply_delta_push(
     (true, None, false) // should_checkpoint determined by caller
 }
 
-/// Check if the accumulator has enough contributions for a checkpoint.
-/// Both conditions must be met:
-/// 1. Number of contributions >= min_contributions (hard floor)
-/// 2. Total contribution weight >= min_weight (quality gate)
-pub fn should_checkpoint(acc: &AccumulatorState, min_contributions: u64, min_weight: f64) -> bool {
-    let count_ok = acc.contributions.len() as u64 >= min_contributions;
-    let total_weight: f64 = acc.contributions.iter().map(|c| c.weight).sum();
-    let weight_ok = total_weight >= min_weight;
-    count_ok && weight_ok
+/// Capability-based checkpoint trigger.
+///
+/// Classifies active nodes into tiers based on observed round times:
+/// - Fast: round_time < 2× median (these nodes block checkpoint production)
+/// - Slow: 2-10× median (contribute but don't block)
+/// - Very slow: >10× median (best-effort, never block)
+///
+/// Triggers checkpoint when all fast-tier nodes have contributed.
+/// Falls back to min_contributions if no profiles exist yet (cold start).
+pub fn should_checkpoint(
+    acc: &AccumulatorState,
+    min_contributions: u64,
+    _min_weight: f64,
+    coord_state: &CoordinatorPersistentState,
+) -> bool {
+    // Hard floor: always need at least min_contributions
+    if (acc.contributions.len() as u64) < min_contributions {
+        return false;
+    }
+
+    // Get active nodes (those with recent heartbeats) that have profiles
+    let active_node_ids: std::collections::HashSet<&String> = coord_state.heartbeats.keys().collect();
+    let active_profiles: Vec<(&String, &NodeProfile)> = coord_state.node_profiles.iter()
+        .filter(|(nid, _)| active_node_ids.contains(nid))
+        .collect();
+
+    // Cold start: no profiles yet, fall back to count-based
+    if active_profiles.is_empty() {
+        return true; // min_contributions already passed
+    }
+
+    // Compute median round time from nodes that have observed times
+    let mut round_times: Vec<f64> = active_profiles.iter()
+        .filter_map(|(_, p)| p.round_time_secs)
+        .collect();
+
+    if round_times.is_empty() {
+        return true; // no timing data yet, fall back to count-based
+    }
+
+    round_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = round_times[round_times.len() / 2];
+
+    // Classify: fast nodes are those with round_time < 2× median
+    let fast_node_ids: std::collections::HashSet<&String> = active_profiles.iter()
+        .filter(|(_, p)| {
+            match p.round_time_secs {
+                Some(t) => t < median * 2.0,
+                None => true, // no timing yet = assume fast (don't skip new nodes)
+            }
+        })
+        .map(|(nid, _)| *nid)
+        .collect();
+
+    // Check: have all fast nodes contributed?
+    let contributing_node_ids: std::collections::HashSet<&str> = acc.contributions.iter()
+        .map(|c| c.node_id.0.as_str())
+        .collect();
+
+    let fast_contributed = fast_node_ids.iter()
+        .all(|nid| contributing_node_ids.contains(nid.as_str()));
+
+    fast_contributed
+}
+
+/// Per-node capability profile tracked by coordinator.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NodeProfile {
+    pub device_type: distrain_shared::types::DeviceType,
+    pub vram_mb: u64,
+    pub gpu_model: String,
+    /// Observed seconds per training round (updated after each delta push).
+    pub round_time_secs: Option<f64>,
+    /// Tier: "fast", "slow", "very_slow". Computed from round_time relative to median.
+    pub tier: String,
 }
 
 /// Persistent coordinator state (survives restarts). Stored in R2.
@@ -141,6 +207,9 @@ pub struct CoordinatorPersistentState {
     /// node_id -> last heartbeat unix timestamp
     #[serde(default)]
     pub heartbeats: std::collections::HashMap<String, u64>,
+    /// node_id -> capability profile (hardware + observed performance)
+    #[serde(default)]
+    pub node_profiles: std::collections::HashMap<String, NodeProfile>,
 }
 
 pub async fn load_coordinator_state(storage: &Storage) -> CoordinatorPersistentState {
