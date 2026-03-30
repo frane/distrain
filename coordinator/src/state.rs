@@ -153,14 +153,22 @@ pub fn should_checkpoint(
     // Count active nodes (those with recent heartbeats)
     let active_count = coord_state.heartbeats.len();
 
-    // All active nodes contributed → trigger immediately
+    // Check how many active nodes have contributed
     let contributing_ids: std::collections::HashSet<&str> = acc.contributions.iter()
         .map(|c| c.node_id.0.as_str())
         .collect();
     let active_contributed = coord_state.heartbeats.keys()
         .filter(|nid| contributing_ids.contains(nid.as_str()))
         .count();
+
+    // All active nodes contributed → trigger immediately
     if active_count > 0 && active_contributed >= active_count {
+        return true;
+    }
+
+    // Supermajority (>= 2/3 of active) contributed → trigger immediately
+    // Better to merge 2 fresh contributions now than wait 2 minutes for the 3rd
+    if active_count >= 2 && active_contributed as f64 >= active_count as f64 * 0.66 {
         return true;
     }
 
