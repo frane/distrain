@@ -266,12 +266,12 @@ async fn push_delta(
     let should_ckpt = state::should_checkpoint(&acc, dynamic_min, app.config.min_weight, &coord_state);
     let agg_in_progress = app.aggregation_in_progress.load(Ordering::SeqCst);
     if accepted {
-        let total_weight: f64 = acc.contributions.iter().map(|c| c.weight).sum();
-        let fast_count = coord_state.node_profiles.values().filter(|p| p.tier == "fast" || p.tier == "unknown").count();
-        let contributing: Vec<&str> = acc.contributions.iter().map(|c| c.node_id.0.as_str()).collect();
+        let active_count = coord_state.heartbeats.len();
+        let first_received = acc.contributions.iter().map(|c| c.received_at).min();
+        let wait_secs = first_received.map(|f| (chrono::Utc::now() - f).num_seconds()).unwrap_or(0);
         info!(
-            "Checkpoint check: contributions={}/{} fast nodes, total_weight={:.2}, should_checkpoint={}, contributors={:?}",
-            acc.contributions.len(), fast_count, total_weight, should_ckpt, contributing,
+            "Checkpoint check: contributions={}/{} active, waiting={}s, should_checkpoint={}, agg_in_progress={}",
+            acc.contributions.len(), active_count, wait_secs, should_ckpt, agg_in_progress,
         );
     }
     if accepted && should_ckpt && !agg_in_progress

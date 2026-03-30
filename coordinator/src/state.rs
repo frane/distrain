@@ -117,69 +117,85 @@ pub fn apply_delta_push(
     (true, None, false) // should_checkpoint determined by caller
 }
 
-/// Capability-based checkpoint trigger.
+/// Patience-based checkpoint trigger.
 ///
-/// Classifies active nodes into tiers based on observed round times:
-/// - Fast: round_time < 2× median (these nodes block checkpoint production)
-/// - Slow: 2-10× median (contribute but don't block)
-/// - Very slow: >10× median (best-effort, never block)
+/// Inclusive by design: prefers more contributions (diverse gradients are better),
+/// but never stalls. Uses a patience window based on observed round times.
 ///
-/// Triggers checkpoint when all fast-tier nodes have contributed.
-/// Falls back to min_contributions if no profiles exist yet (cold start).
+/// Logic:
+/// 1. Need at least 1 contribution.
+/// 2. If MIN_CONTRIBUTIONS is set (> 0) and met → trigger immediately (override).
+/// 3. If ALL active nodes have contributed → trigger immediately (best case).
+/// 4. Otherwise, wait up to 1.5× median round time for more contributions.
+/// 5. If patience expires → trigger with whatever we have (self-healing).
+///
+/// Dynamic: adapts as nodes join/leave (active = recent heartbeat).
+/// Self-healing: patience timeout prevents deadlock from crashed/slow nodes.
 pub fn should_checkpoint(
     acc: &AccumulatorState,
-    min_contributions: u64,
+    min_contributions_override: u64,
     _min_weight: f64,
     coord_state: &CoordinatorPersistentState,
 ) -> bool {
-    // Hard floor: always need at least min_contributions
-    if (acc.contributions.len() as u64) < min_contributions {
+    let num_contribs = acc.contributions.len();
+
+    // Need at least 1 contribution
+    if num_contribs == 0 {
         return false;
     }
 
-    // Get active nodes (those with recent heartbeats) that have profiles
-    let active_node_ids: std::collections::HashSet<&String> = coord_state.heartbeats.keys().collect();
-    let active_profiles: Vec<(&String, &NodeProfile)> = coord_state.node_profiles.iter()
-        .filter(|(nid, _)| active_node_ids.contains(nid))
-        .collect();
-
-    // Cold start: no profiles yet, fall back to count-based
-    if active_profiles.is_empty() {
-        return true; // min_contributions already passed
+    // MIN_CONTRIBUTIONS override: if set (> 0) and met, trigger immediately.
+    // This is a manual override, not the default behavior.
+    if min_contributions_override > 0 && num_contribs as u64 >= min_contributions_override {
+        return true;
     }
 
-    // Compute median round time from nodes that have observed times
-    let mut round_times: Vec<f64> = active_profiles.iter()
-        .filter_map(|(_, p)| p.round_time_secs)
-        .collect();
+    // Count active nodes (those with recent heartbeats)
+    let active_count = coord_state.heartbeats.len();
 
-    if round_times.is_empty() {
-        return true; // no timing data yet, fall back to count-based
-    }
-
-    round_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = round_times[round_times.len() / 2];
-
-    // Classify: fast nodes are those with round_time < 2× median
-    let fast_node_ids: std::collections::HashSet<&String> = active_profiles.iter()
-        .filter(|(_, p)| {
-            match p.round_time_secs {
-                Some(t) => t < median * 2.0,
-                None => true, // no timing yet = assume fast (don't skip new nodes)
-            }
-        })
-        .map(|(nid, _)| *nid)
-        .collect();
-
-    // Check: have all fast nodes contributed?
-    let contributing_node_ids: std::collections::HashSet<&str> = acc.contributions.iter()
+    // All active nodes contributed → trigger immediately
+    let contributing_ids: std::collections::HashSet<&str> = acc.contributions.iter()
         .map(|c| c.node_id.0.as_str())
         .collect();
+    let active_contributed = coord_state.heartbeats.keys()
+        .filter(|nid| contributing_ids.contains(nid.as_str()))
+        .count();
+    if active_count > 0 && active_contributed >= active_count {
+        return true;
+    }
 
-    let fast_contributed = fast_node_ids.iter()
-        .all(|nid| contributing_node_ids.contains(nid.as_str()));
+    // Patience window: how long since first contribution arrived?
+    let now = chrono::Utc::now();
+    let first_received = acc.contributions.iter()
+        .map(|c| c.received_at)
+        .min();
+    let elapsed_secs = match first_received {
+        Some(first) => (now - first).num_seconds().max(0) as f64,
+        None => 0.0,
+    };
 
-    fast_contributed
+    // Compute patience from observed round times
+    let mut round_times: Vec<f64> = coord_state.node_profiles.values()
+        .filter_map(|p| p.round_time_secs)
+        .collect();
+
+    let patience_secs = if round_times.is_empty() {
+        // Cold start: no timing data. Use generous default (120s).
+        120.0
+    } else {
+        round_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = round_times[round_times.len() / 2];
+        // Wait 1.5× median for stragglers, but cap at 5 minutes
+        (median * 1.5).min(300.0)
+    };
+
+    // Patience expired → trigger with what we have
+    if elapsed_secs >= patience_secs {
+        return true;
+    }
+
+    // Still within patience window, keep waiting for more contributions
+    false
 }
 
 /// Per-node capability profile tracked by coordinator.
