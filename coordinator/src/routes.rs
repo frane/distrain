@@ -92,7 +92,7 @@ async fn register_node(
             vram_mb: hw.vram_mb,
             gpu_model: hw.gpu_model.clone(),
             round_time_secs: None,
-            tier: "unknown".to_string(),
+            last_push_time: None,
         });
         let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
     }
