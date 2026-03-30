@@ -257,13 +257,8 @@ async fn push_delta(
         let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
     }
 
-    let dynamic_min = std::cmp::max(
-        app.config.min_contributions,
-        std::cmp::max(1, (coord_state.active_nodes as f64 * 0.66).floor() as u64),
-    );
-
-    // Capability-based checkpoint trigger: waits for all fast nodes
-    let should_ckpt = state::should_checkpoint(&acc, dynamic_min, app.config.min_weight, &coord_state);
+    // Patience-based checkpoint trigger. MIN_CONTRIBUTIONS is a manual override only.
+    let should_ckpt = state::should_checkpoint(&acc, app.config.min_contributions, app.config.min_weight, &coord_state);
     let agg_in_progress = app.aggregation_in_progress.load(Ordering::SeqCst);
     if accepted {
         let active_count = coord_state.heartbeats.len();
@@ -283,8 +278,8 @@ async fn push_delta(
             .is_ok()
         {
             info!(
-                "Triggering aggregation: {} contributions (dynamic_min={}, active_nodes={})",
-                acc.contributions.len(), dynamic_min, coord_state.active_nodes
+                "Triggering aggregation: {} contributions (active_nodes={})",
+                acc.contributions.len(), coord_state.active_nodes
             );
 
             METRICS.aggregations_total.fetch_add(1, Ordering::Relaxed);
