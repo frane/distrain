@@ -48,10 +48,5 @@ cat /workspace/node.toml
 
 export RUST_LOG="${RUST_LOG:-info}"
 
-# Compat shim for older NVIDIA drivers missing cuCtxGetDevice_v2
-if [ -f /usr/local/lib/libcuda_compat.so ]; then
-  export LD_PRELOAD="/usr/local/lib/libcuda_compat.so${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
-
-# Start training (foreground so container stays alive)
-exec distrain-node start --config /workspace/node.toml
+# Start training (foreground, tee to log file for SSH debugging)
+exec distrain-node start --config /workspace/node.toml 2>&1 | tee /workspace/distrain-node.log
