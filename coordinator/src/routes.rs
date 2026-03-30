@@ -246,11 +246,11 @@ async fn push_delta(
                     .as_secs();
                 let elapsed = now.saturating_sub(last_seen) as f64;
                 if elapsed > 5.0 && elapsed < 600.0 { // reasonable range
-                    profile.round_time_secs = Some(elapsed);
-                    // Classify tier
-                    profile.tier = if elapsed < 120.0 { "fast".to_string() }
-                        else if elapsed < 600.0 { "slow".to_string() }
-                        else { "very_slow".to_string() };
+                    // EMA of round time (smooth out autotuning spikes)
+                    profile.round_time_secs = Some(match profile.round_time_secs {
+                        Some(prev) => prev * 0.5 + elapsed * 0.5,
+                        None => elapsed,
+                    });
                 }
             }
         }

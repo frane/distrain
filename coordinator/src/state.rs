@@ -166,12 +166,6 @@ pub fn should_checkpoint(
         return true;
     }
 
-    // Supermajority (>= 2/3 of active) contributed → trigger immediately
-    // Better to merge 2 fresh contributions now than wait 2 minutes for the 3rd
-    if active_count >= 2 && active_contributed as f64 >= active_count as f64 * 0.66 {
-        return true;
-    }
-
     // Patience window: how long since first contribution arrived?
     let now = chrono::Utc::now();
     let first_received = acc.contributions.iter()
@@ -188,13 +182,17 @@ pub fn should_checkpoint(
         .collect();
 
     let patience_secs = if round_times.is_empty() {
-        // Cold start: no timing data. Use generous default (120s).
-        120.0
+        // Cold start: no timing data. Use moderate default (60s).
+        // Short enough to not stall, long enough for 3 nodes to push.
+        60.0
     } else {
         round_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = round_times[round_times.len() / 2];
-        // Wait 1.5× median for stragglers, but cap at 5 minutes
-        (median * 1.5).min(300.0)
+        // Use the fastest round time (not median) as baseline.
+        // The fastest reflects steady-state; slower times are often from
+        // autotuning or checkpoint downloads inflating the first rounds.
+        let fastest = round_times[0];
+        // Wait 2× fastest for stragglers, cap at 3 minutes
+        (fastest * 2.0).clamp(30.0, 180.0)
     };
 
     // Patience expired → trigger with what we have
