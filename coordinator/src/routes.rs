@@ -234,25 +234,26 @@ async fn push_delta(
     // Load coordinator state for capability-based checkpoint trigger
     let mut coord_state = state::load_coordinator_state(&app.storage).await;
 
-    // Update node's observed round time (from training_loss timestamp proxy: round_time ≈ inner_steps * step_time)
-    // We estimate from the push frequency: if we've seen this node before, compute time since last push
+    // Track round time: time between consecutive delta pushes from the same node.
+    // This measures the actual full round (train + compress + upload + download next checkpoint).
     if accepted {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         if let Some(profile) = coord_state.node_profiles.get_mut(&push.node_id.0) {
-            // Use heartbeat timestamp delta as round time estimate
-            if let Some(&last_seen) = coord_state.heartbeats.get(&push.node_id.0) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let elapsed = now.saturating_sub(last_seen) as f64;
-                if elapsed > 5.0 && elapsed < 600.0 { // reasonable range
-                    // EMA of round time (smooth out autotuning spikes)
+            if let Some(last_push) = profile.last_push_time {
+                let elapsed = now_secs.saturating_sub(last_push) as f64;
+                if elapsed > 10.0 && elapsed < 600.0 {
+                    // EMA of round time (smooth out spikes from first round / autotuning)
                     profile.round_time_secs = Some(match profile.round_time_secs {
-                        Some(prev) => prev * 0.5 + elapsed * 0.5,
+                        Some(prev) => prev * 0.3 + elapsed * 0.7, // favor recent
                         None => elapsed,
                     });
                 }
             }
+            profile.last_push_time = Some(now_secs);
         }
         let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
     }

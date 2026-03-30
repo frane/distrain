@@ -176,9 +176,11 @@ pub fn should_checkpoint(
         None => 0.0,
     };
 
-    // Compute patience from observed round times
-    let mut round_times: Vec<f64> = coord_state.node_profiles.values()
-        .filter_map(|p| p.round_time_secs)
+    // Compute patience from ACTIVE nodes' round times only (not stale profiles from old runs)
+    let active_ids: std::collections::HashSet<&String> = coord_state.heartbeats.keys().collect();
+    let mut round_times: Vec<f64> = coord_state.node_profiles.iter()
+        .filter(|(nid, _)| active_ids.contains(nid))
+        .filter_map(|(_, p)| p.round_time_secs)
         .collect();
 
     let patience_secs = if round_times.is_empty() {
@@ -187,12 +189,11 @@ pub fn should_checkpoint(
         60.0
     } else {
         round_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        // Use the fastest round time (not median) as baseline.
-        // The fastest reflects steady-state; slower times are often from
-        // autotuning or checkpoint downloads inflating the first rounds.
-        let fastest = round_times[0];
-        // Wait 2× fastest for stragglers, cap at 3 minutes
-        (fastest * 2.0).clamp(30.0, 180.0)
+        // Use the SLOWEST active node's round time as patience baseline.
+        // We WANT all nodes to contribute. With identical nodes, the slowest
+        // is the one we need to wait for. Add 20% buffer for variance.
+        let slowest = round_times[round_times.len() - 1];
+        (slowest * 1.2).clamp(30.0, 300.0)
     };
 
     // Patience expired → trigger with what we have
@@ -210,10 +211,11 @@ pub struct NodeProfile {
     pub device_type: distrain_shared::types::DeviceType,
     pub vram_mb: u64,
     pub gpu_model: String,
-    /// Observed seconds per training round (updated after each delta push).
+    /// Observed seconds per training round (time between consecutive delta pushes).
     pub round_time_secs: Option<f64>,
-    /// Tier: "fast", "slow", "very_slow". Computed from round_time relative to median.
-    pub tier: String,
+    /// Unix timestamp of last delta push from this node.
+    #[serde(default)]
+    pub last_push_time: Option<u64>,
 }
 
 /// Persistent coordinator state (survives restarts). Stored in R2.
