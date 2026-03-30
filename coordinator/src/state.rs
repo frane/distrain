@@ -189,11 +189,16 @@ pub fn should_checkpoint(
         60.0
     } else {
         round_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        // Use the SLOWEST active node's round time as patience baseline.
-        // We WANT all nodes to contribute. With identical nodes, the slowest
-        // is the one we need to wait for. Add 20% buffer for variance.
-        let slowest = round_times[round_times.len() - 1];
-        (slowest * 1.2).clamp(30.0, 300.0)
+        let median = round_times[round_times.len() / 2];
+        // Wait for nodes within 3× median (the "cluster" of similar-speed nodes).
+        // Outliers beyond 3× are too slow to wait for — they contribute when ready.
+        // This way: 3 identical GPUs → wait for all. 2 GPUs + 1 CPU → wait for GPUs only.
+        let cluster_max = round_times.iter()
+            .filter(|&&t| t <= median * 3.0)
+            .copied()
+            .last()
+            .unwrap_or(median);
+        (cluster_max * 1.2).clamp(30.0, 300.0)
     };
 
     // Patience expired → trigger with what we have
