@@ -325,7 +325,7 @@ async fn push_delta(
                         // Reset accumulator
                         let new_acc = AccumulatorState {
                             checkpoint_version: new_version,
-                            contributions: Vec::new(),
+                            contributions: Vec::new(), first_contribution_at: None,
                             version: acc_clone.version + 1,
                         };
                         if let Err(e) = state::save_accumulator(&storage, &new_acc).await {
@@ -371,7 +371,7 @@ async fn get_latest_checkpoint(State(app): State<Arc<AppState>>) -> impl IntoRes
         .await
         .unwrap_or(AccumulatorState {
             checkpoint_version: 0,
-            contributions: Vec::new(),
+            contributions: Vec::new(), first_contribution_at: None,
             version: 0,
         });
 
@@ -412,7 +412,7 @@ async fn get_status(State(app): State<Arc<AppState>>) -> impl IntoResponse {
         .await
         .unwrap_or(AccumulatorState {
             checkpoint_version: 0,
-            contributions: Vec::new(),
+            contributions: Vec::new(), first_contribution_at: None,
             version: 0,
         });
 
@@ -483,7 +483,7 @@ async fn heartbeat(
 
     // Check if node should abort: if checkpoint advanced beyond what it's training on
     let acc = state::load_accumulator(&app.storage).await.unwrap_or(AccumulatorState {
-        checkpoint_version: 0, contributions: Vec::new(), version: 0,
+        checkpoint_version: 0, contributions: Vec::new(), first_contribution_at: None, version: 0,
     });
     let current_version = acc.checkpoint_version;
     let should_abort = if let Some(node_version) = req.checkpoint_version {

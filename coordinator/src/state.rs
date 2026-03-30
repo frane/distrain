@@ -16,7 +16,7 @@ pub async fn load_accumulator(storage: &Storage) -> Result<AccumulatorState> {
             info!("No accumulator state found, creating empty");
             Ok(AccumulatorState {
                 checkpoint_version: 0,
-                contributions: Vec::new(),
+                contributions: Vec::new(), first_contribution_at: None,
                 version: 0,
             })
         }
@@ -112,6 +112,11 @@ pub fn apply_delta_push(
         training_loss: push.training_loss,
     });
 
+    // Set patience start time on first contribution (never reset within cycle)
+    if acc.first_contribution_at.is_none() {
+        acc.first_contribution_at = Some(Utc::now());
+    }
+
     acc.version += 1;
 
     (true, None, false) // should_checkpoint determined by caller
@@ -166,12 +171,10 @@ pub fn should_checkpoint(
         return true;
     }
 
-    // Patience window: how long since first contribution arrived?
+    // Patience window: how long since first contribution in this cycle?
+    // Uses first_contribution_at which is set once and never reset by subsequent pushes.
     let now = chrono::Utc::now();
-    let first_received = acc.contributions.iter()
-        .map(|c| c.received_at)
-        .min();
-    let elapsed_secs = match first_received {
+    let elapsed_secs = match acc.first_contribution_at {
         Some(first) => (now - first).num_seconds().max(0) as f64,
         None => 0.0,
     };

@@ -84,6 +84,10 @@ pub struct AccumulatorState {
     pub checkpoint_version: u64,
     pub contributions: Vec<ContributionMeta>,
     pub version: u64,
+    /// When the first contribution arrived in this checkpoint cycle.
+    /// Set once, never reset by subsequent contributions. Used for patience timing.
+    #[serde(default)]
+    pub first_contribution_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Metadata about a single delta contribution (no tensors, just keys).
