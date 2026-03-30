@@ -122,7 +122,10 @@ impl CoordinatorClient {
             loss,
             checkpoint_version,
         };
-        let resp = reqwest::blocking::Client::new()
+        let resp = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
             .post(format!("{}/heartbeat", self.base_url))
             .json(&req)
             .send()

@@ -739,7 +739,11 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                             mem_abort_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                             return true;
                         }
-                        // Per-step heartbeat (sync, best-effort)
+                        // Heartbeat every 10 steps, not every step.
+                        // The sync HTTP call can block training if coordinator is slow.
+                        if progress.step % 10 != 0 && progress.step + 1 != progress.total_steps {
+                            return false;
+                        }
                         let client = crate::client::CoordinatorClient::new(&hb_url);
                         match client.heartbeat_sync(
                             &hb_node_id,
