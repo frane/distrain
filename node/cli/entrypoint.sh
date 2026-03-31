@@ -33,7 +33,6 @@ cache_dir = "/workspace/cache"
 max_cache_gb = 20
 batch_size = ${BATCH_SIZE}
 seq_len = 512
-force_batch_size = ${BATCH_SIZE}
 
 [storage]
 endpoint = "${S3_ENDPOINT}"

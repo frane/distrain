@@ -315,25 +315,10 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         hardware_profile.vram_mb, hardware_profile.cpu_cores, hardware_profile.ram_mb,
     );
 
-    // Register
-    let reg = coordinator.register(&config, persistent_id, Some(hardware_profile.clone())).await?;
-    info!("Registered as {} (api_key starts with {}...)", reg.node_id, &reg.api_key[..8]);
-
-    // Persist the node ID for reuse across restarts
-    tokio::fs::create_dir_all(&cache_dir_expanded).await?;
-    tokio::fs::write(&node_id_path, &reg.node_id.0).await?;
-
-    // Merge coordinator training params (coordinator is source of truth)
-    if let Some(params) = reg.training_params {
-        info!(
-            "Training params from coordinator: lr={:.2e}→{:.2e}, warmup={:.0}%, grad_clip={}, shards={:.0}%",
-            params.lr_max, params.lr_min, params.warmup_fraction * 100.0,
-            params.grad_clip_norm, params.shards_fraction * 100.0,
-        );
-        config.training_params = Some(params);
-    }
-
-    let node_id = reg.node_id.0;
+    // Don't register yet. Node registers AFTER calibration with full hardware profile.
+    // Training params come from /config endpoint (auto-discovery) or node.toml.
+    // Node ID comes from persistent file or will be assigned at registration.
+    let mut node_id = persistent_id.unwrap_or_default();
     let mut seq_num: u64 = 0;
 
     // H_mini temporary value — overridden by coordinator params below
@@ -651,26 +636,29 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             );
             stress_tested = true;
 
-            // Report calibrated training profile to coordinator (after autotune + calibration)
-            let overhead_secs = 15.0; // checkpoint download + shard refresh + compression + upload
-            let sps = gpu_secs_per_step.unwrap_or(10.0);
+            // Register with coordinator NOW — after autotune + calibration.
+            // This is the only registration. No early registration means no ghost nodes.
+            let sps = gpu_secs_per_step.unwrap_or(1.0); // estimate if timing probe was skipped
+            let overhead_secs = 15.0;
             let expected_round = h_mini as f64 * sps + overhead_secs;
-            let mut updated_profile = hardware_profile.clone();
-            updated_profile.step_time_secs = gpu_secs_per_step;
-            updated_profile.h_mini = Some(h_mini);
-            updated_profile.batch_size = Some(batch_size);
-            updated_profile.expected_round_time_secs = Some(expected_round);
+            let mut calibrated_profile = hardware_profile.clone();
+            calibrated_profile.step_time_secs = gpu_secs_per_step;
+            calibrated_profile.h_mini = Some(h_mini);
+            calibrated_profile.batch_size = Some(batch_size);
+            calibrated_profile.expected_round_time_secs = Some(expected_round);
+            let persistent = if node_id.is_empty() { None } else { Some(node_id.clone()) };
+            let reg = coordinator.register(&config, persistent, Some(calibrated_profile)).await?;
+            node_id = reg.node_id.0.clone();
             info!(
-                "Reporting calibrated profile: step_time={:.2}s, H_mini={}, batch_size={}, expected_round={:.0}s",
-                sps, h_mini, batch_size, expected_round,
+                "Registered as {node_id}: step_time={sps:.2}s, H_mini={h_mini}, batch_size={batch_size}, expected_round={expected_round:.0}s",
             );
-            // Fire-and-forget update (best-effort, don't block training)
-            let coord_clone = coordinator.clone();
-            let config_clone = config.clone();
-            let nid_clone = node_id.clone();
-            tokio::spawn(async move {
-                let _ = coord_clone.register(&config_clone, Some(nid_clone), Some(updated_profile)).await;
-            });
+            // Persist node ID
+            tokio::fs::create_dir_all(&cache_dir_expanded).await?;
+            tokio::fs::write(&node_id_path, &node_id).await?;
+            // Merge training params from coordinator
+            if let Some(params) = reg.training_params {
+                config.training_params = Some(params);
+            }
         }
 
         // Compute deterministic shard assignment for this node + version
