@@ -288,6 +288,8 @@ pub struct ContinuousTrainingParams {
     pub seq_len: usize,
     pub node_id: String,
     pub initial_version: u64,
+    /// Starting seq_num (persists across inner loop restarts).
+    pub initial_seq_num: u64,
     /// Pre-loaded batches for the first round.
     pub initial_batches: Vec<Vec<i64>>,
 }
@@ -307,15 +309,16 @@ fn continuous_training_loop(
     delta_tx: tokio::sync::mpsc::Sender<DeltaPackage>,
     mut error_buffer: ErrorBuffer,
     heartbeat_url: String,
-) -> ErrorBuffer {
+) -> (ErrorBuffer, u64) {
     let device: GpuDevice = Default::default();
+    let mut seq_num: u64 = params.initial_seq_num;
 
     // Load initial checkpoint
     let start_params = match load_safetensors_map(&params.checkpoint_path) {
         Ok(p) => p,
         Err(e) => {
             error!("Failed to load initial checkpoint: {e:#}");
-            return error_buffer;
+            return (error_buffer, seq_num);
         }
     };
 
@@ -345,7 +348,6 @@ fn continuous_training_loop(
 
     // Track state across rounds
     let current_version = params.initial_version;
-    let mut seq_num: u64 = 0;
     let mut global_step: u64 = 0;
     let mut round_step: u64 = 0;
     let mut round_start_params = start_params;
@@ -397,7 +399,7 @@ fn continuous_training_loop(
                         // Best-effort send (don't block training)
                         if delta_tx.blocking_send(pkg).is_err() {
                             warn!("Delta channel closed during checkpoint swap");
-                            return error_buffer;
+                            return (error_buffer, seq_num);
                         }
                     }
                 }
@@ -416,7 +418,7 @@ fn continuous_training_loop(
                     "Checkpoint swap v{current_version} -> v{new_version} in {:.0}ms, returning for data refill",
                     swap_start.elapsed().as_millis()
                 );
-                return error_buffer;
+                return (error_buffer, seq_num);
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 // No new checkpoint, continue training
@@ -441,7 +443,7 @@ fn continuous_training_loop(
                         let _ = delta_tx.blocking_send(pkg);
                     }
                 }
-                return error_buffer;
+                return (error_buffer, seq_num);
             }
         }
 
@@ -478,7 +480,7 @@ fn continuous_training_loop(
             ) {
                 if delta_tx.blocking_send(pkg).is_err() {
                     warn!("Delta channel closed, training loop exiting");
-                    return error_buffer;
+                    return (error_buffer, seq_num);
                 }
             }
 
@@ -518,7 +520,7 @@ fn continuous_training_loop(
                         let _ = delta_tx.blocking_send(pkg);
                     }
                 }
-                return error_buffer;
+                return (error_buffer, seq_num);
             }
         };
 
@@ -707,7 +709,7 @@ pub async fn run_continuous_training(
 ) -> Result<()> {
     // Persistent state across restarts of the inner loop
     let mut error_buffer = error_buffer;
-    let seq_num: u64 = 0;
+    let mut seq_num: u64 = 0;
 
     loop {
         // Get latest checkpoint
@@ -836,6 +838,7 @@ pub async fn run_continuous_training(
             seq_len,
             node_id: node_id.clone(),
             initial_version: version,
+            initial_seq_num: seq_num,
             initial_batches: batches,
         };
 
@@ -843,7 +846,7 @@ pub async fn run_continuous_training(
         let eb_in = std::mem::take(&mut error_buffer);
 
         // Run training on blocking thread
-        let eb_out = tokio::task::spawn_blocking(move || {
+        let (eb_out, new_seq_num) = tokio::task::spawn_blocking(move || {
             continuous_training_loop(
                 cont_params,
                 checkpoint_rx,
@@ -855,10 +858,11 @@ pub async fn run_continuous_training(
         .await
         .unwrap_or_else(|e| {
             error!("Training thread panicked: {e}");
-            ErrorBuffer::new()
+            (ErrorBuffer::new(), seq_num)
         });
 
         error_buffer = eb_out;
+        seq_num = new_seq_num;
 
         // Clean up tasks
         cm_handle.abort();
