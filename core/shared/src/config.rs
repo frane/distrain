@@ -49,6 +49,12 @@ pub struct CoordinatorConfig {
     /// When exceeded, oldest versions are deleted. 0 = use keep_versions only.
     #[serde(default)]
     pub max_storage_gb: u64,
+    /// External S3 endpoint returned to nodes via /config.
+    /// When set, the /config and /nodes/register endpoints return this instead of storage.endpoint.
+    /// Use this when the coordinator uses localhost:9000 for internal MinIO but nodes need
+    /// an external URL (e.g. http://PUBLIC_IP:9000).
+    #[serde(default)]
+    pub external_storage_endpoint: Option<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -66,6 +72,7 @@ impl Default for CoordinatorConfig {
             vocab_size: 32768,
             min_weight: default_min_weight(),
             max_storage_gb: 0,
+            external_storage_endpoint: None,
         }
     }
 }

@@ -104,6 +104,11 @@ async fn register_node(
         let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
     }
 
+    let node_endpoint = app.config.external_storage_endpoint
+        .as_deref()
+        .unwrap_or(&app.config.storage.endpoint)
+        .to_string();
+
     (
         StatusCode::OK,
         Json(
@@ -111,7 +116,7 @@ async fn register_node(
                 node_id,
                 api_key,
                 status: NodeStatus::Active,
-                storage_endpoint: Some(app.config.storage.endpoint.clone()),
+                storage_endpoint: Some(node_endpoint),
                 storage_bucket: Some(app.config.storage.bucket.clone()),
                 training_params: Some(TrainingParams::default()),
             })
@@ -398,9 +403,16 @@ async fn get_latest_checkpoint(State(app): State<Arc<AppState>>) -> impl IntoRes
 
 /// GET /config — auto-discovery: returns everything a node needs to join.
 async fn get_config(State(app): State<Arc<AppState>>) -> impl IntoResponse {
+    // Return external storage endpoint if configured (for Docker deployments where
+    // coordinator uses localhost:9000 internally but nodes need the public URL).
+    let node_endpoint = app.config.external_storage_endpoint
+        .as_deref()
+        .unwrap_or(&app.config.storage.endpoint)
+        .to_string();
+
     let auto_config = NodeAutoConfig {
         storage: StorageConfigPublic {
-            endpoint: app.config.storage.endpoint.clone(),
+            endpoint: node_endpoint,
             bucket: app.config.storage.bucket.clone(),
             access_key_id: app.config.storage.access_key_id.clone(),
             secret_access_key: app.config.storage.secret_access_key.clone(),

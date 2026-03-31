@@ -121,6 +121,9 @@ fn load_config() -> CoordinatorConfig {
     if let Ok(v) = std::env::var("MIN_WEIGHT") {
         config.min_weight = v.parse().unwrap_or(1.5);
     }
+    if let Ok(v) = std::env::var("S3_EXTERNAL_ENDPOINT") {
+        config.external_storage_endpoint = Some(v);
+    }
 
     config
 }

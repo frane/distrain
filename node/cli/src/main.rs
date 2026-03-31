@@ -659,7 +659,30 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             if let Some(params) = reg.training_params {
                 config.training_params = Some(params);
             }
+
+            // GPU mode: use continuous training loop (GPU never idles)
+            if !config.force_cpu {
+                info!("Entering continuous GPU training mode");
+                return distrain_node::continuous::run_continuous_training(
+                    &mut config,
+                    coordinator,
+                    storage,
+                    cache_dir,
+                    node_id,
+                    h_mini,
+                    batch_size,
+                    grad_accum_steps,
+                    &manifest,
+                    data_cache,
+                    total_shards,
+                    shards_per_node,
+                    error_buffer,
+                )
+                .await;
+            }
         }
+
+        // CPU fallback: original round-based loop continues below
 
         // Compute deterministic shard assignment for this node + version
         let shard_ids = distrain_model::compute_shard_assignment(
