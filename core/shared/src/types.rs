@@ -229,6 +229,7 @@ impl Default for DeviceType {
 }
 
 /// Hardware profile reported by a node at registration.
+/// Node fills this AFTER autotune + calibration, so all values are measured, not estimated.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HardwareProfile {
     pub gpu_model: String,
@@ -236,8 +237,18 @@ pub struct HardwareProfile {
     pub device_type: DeviceType,
     pub cpu_cores: u32,
     pub ram_mb: u64,
+    /// Measured seconds per training step (from calibration).
     #[serde(default)]
-    pub measured_step_time_secs: Option<f64>,
+    pub step_time_secs: Option<f64>,
+    /// Node's chosen H_mini (inner steps per round).
+    #[serde(default)]
+    pub h_mini: Option<u64>,
+    /// Node's batch size.
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+    /// Expected round time in seconds (h_mini * step_time + overhead).
+    #[serde(default)]
+    pub expected_round_time_secs: Option<f64>,
 }
 
 /// Node registration request body.

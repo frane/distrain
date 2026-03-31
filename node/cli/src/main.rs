@@ -294,7 +294,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     device_type,
                     cpu_cores,
                     ram_mb,
-                    measured_step_time_secs: None,
+                    ..Default::default()
                 }
             }
             _ => {
@@ -304,7 +304,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     device_type: DeviceType::Cpu,
                     cpu_cores,
                     ram_mb,
-                    measured_step_time_secs: None,
+                    ..Default::default()
                 }
             }
         }
@@ -316,7 +316,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     );
 
     // Register
-    let reg = coordinator.register(&config, persistent_id, Some(hardware_profile)).await?;
+    let reg = coordinator.register(&config, persistent_id, Some(hardware_profile.clone())).await?;
     info!("Registered as {} (api_key starts with {}...)", reg.node_id, &reg.api_key[..8]);
 
     // Persist the node ID for reuse across restarts
@@ -650,6 +650,27 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                 if config.force_cpu { "CPU" } else { "GPU" },
             );
             stress_tested = true;
+
+            // Report calibrated training profile to coordinator (after autotune + calibration)
+            let overhead_secs = 15.0; // checkpoint download + shard refresh + compression + upload
+            let sps = gpu_secs_per_step.unwrap_or(10.0);
+            let expected_round = h_mini as f64 * sps + overhead_secs;
+            let mut updated_profile = hardware_profile.clone();
+            updated_profile.step_time_secs = gpu_secs_per_step;
+            updated_profile.h_mini = Some(h_mini);
+            updated_profile.batch_size = Some(batch_size);
+            updated_profile.expected_round_time_secs = Some(expected_round);
+            info!(
+                "Reporting calibrated profile: step_time={:.2}s, H_mini={}, batch_size={}, expected_round={:.0}s",
+                sps, h_mini, batch_size, expected_round,
+            );
+            // Fire-and-forget update (best-effort, don't block training)
+            let coord_clone = coordinator.clone();
+            let config_clone = config.clone();
+            let nid_clone = node_id.clone();
+            tokio::spawn(async move {
+                let _ = coord_clone.register(&config_clone, Some(nid_clone), Some(updated_profile)).await;
+            });
         }
 
         // Compute deterministic shard assignment for this node + version

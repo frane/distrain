@@ -179,11 +179,15 @@ pub fn should_checkpoint(
         None => 0.0,
     };
 
-    // Compute patience from ACTIVE nodes' round times only (not stale profiles from old runs)
+    // Compute patience from ACTIVE nodes' expected round times.
+    // Prefer node-reported expected_round_time (from calibration) over observed push intervals.
     let active_ids: std::collections::HashSet<&String> = coord_state.heartbeats.keys().collect();
     let mut round_times: Vec<f64> = coord_state.node_profiles.iter()
         .filter(|(nid, _)| active_ids.contains(nid))
-        .filter_map(|(_, p)| p.round_time_secs)
+        .filter_map(|(_, p)| {
+            // Use reported expected time if available, fall back to observed
+            p.expected_round_time.or(p.round_time_secs)
+        })
         .collect();
 
     let patience_secs = if round_times.is_empty() {
@@ -221,6 +225,15 @@ pub struct NodeProfile {
     pub gpu_model: String,
     /// Observed seconds per training round (time between consecutive delta pushes).
     pub round_time_secs: Option<f64>,
+    /// Node-reported expected round time (from calibration: h_mini * step_time + overhead).
+    #[serde(default)]
+    pub expected_round_time: Option<f64>,
+    /// Node-reported step time in seconds.
+    #[serde(default)]
+    pub step_time_secs: Option<f64>,
+    /// Node-reported H_mini.
+    #[serde(default)]
+    pub h_mini: Option<u64>,
     /// Unix timestamp of last delta push from this node.
     #[serde(default)]
     pub last_push_time: Option<u64>,

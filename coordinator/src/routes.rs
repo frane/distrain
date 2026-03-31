@@ -92,8 +92,15 @@ async fn register_node(
             vram_mb: hw.vram_mb,
             gpu_model: hw.gpu_model.clone(),
             round_time_secs: None,
+            expected_round_time: hw.expected_round_time_secs,
+            step_time_secs: hw.step_time_secs,
+            h_mini: hw.h_mini,
             last_push_time: None,
         });
+        if let Some(ert) = hw.expected_round_time_secs {
+            info!("Node {} calibrated: step_time={:.2}s, H_mini={}, expected_round={:.0}s",
+                node_id, hw.step_time_secs.unwrap_or(0.0), hw.h_mini.unwrap_or(0), ert);
+        }
         let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
     }
 
