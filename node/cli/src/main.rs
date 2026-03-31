@@ -410,10 +410,12 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             memory_pressure_abort = false;
         }
 
-        // Heartbeat: tell coordinator we're alive (best-effort)
-        match coordinator.heartbeat(&node_id, None, None, None, None).await {
-            Ok(resp) => info!("Heartbeat OK ({} active nodes)", resp.active_nodes),
-            Err(e) => warn!("Heartbeat failed (non-fatal): {e}"),
+        // Heartbeat: tell coordinator we're alive (only after registration)
+        if !node_id.is_empty() {
+            match coordinator.heartbeat(&node_id, None, None, None, None).await {
+                Ok(resp) => info!("Heartbeat OK ({} active nodes)", resp.active_nodes),
+                Err(e) => warn!("Heartbeat failed (non-fatal): {e}"),
+            }
         }
 
         // Get latest checkpoint version
