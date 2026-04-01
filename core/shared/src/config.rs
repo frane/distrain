@@ -89,8 +89,10 @@ pub struct NodeConfig {
     pub max_inner_steps: u64,
     pub cache_dir: String,
     pub max_cache_gb: u64,
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
+    /// Batch size. If not set, auto-detected from VRAM.
+    /// Set via toml `batch_size = N` or env `BATCH_SIZE=N`.
+    #[serde(default)]
+    pub batch_size: Option<usize>,
     #[serde(default = "default_seq_len")]
     pub seq_len: usize,
     #[serde(default)]
@@ -98,7 +100,7 @@ pub struct NodeConfig {
     /// Maximum fraction of available RAM to use (0.0-1.0). Default 0.80.
     #[serde(default = "default_max_memory_fraction")]
     pub max_memory_fraction: f64,
-    /// Force batch_size without probing. Skips GPU subprocess calibration entirely.
+    /// Alias for batch_size (backwards compat).
     #[serde(default)]
     pub force_batch_size: Option<usize>,
     /// Force CPU backend (set via CLI --cpu flag, not from config file)
@@ -112,10 +114,6 @@ fn default_min_weight() -> f64 {
 
 fn default_max_memory_fraction() -> f64 {
     0.80
-}
-
-fn default_batch_size() -> usize {
-    4
 }
 
 fn default_seq_len() -> usize {
@@ -134,7 +132,7 @@ impl Default for NodeConfig {
             max_inner_steps: 500,
             cache_dir: "~/.distrain/cache".to_string(),
             max_cache_gb: 100,
-            batch_size: 4,
+            batch_size: None,
             seq_len: 512,
             training_params: None,
             max_memory_fraction: default_max_memory_fraction(),

@@ -235,7 +235,7 @@ async fn build_config_from_coordinator(url: &str) -> Result<NodeConfig> {
         max_inner_steps: auto_config.training_params.max_inner_steps,
         cache_dir: "~/.distrain/cache".to_string(),
         max_cache_gb: 100,
-        batch_size: auto_config.training_params.batch_size,
+        batch_size: Some(auto_config.training_params.batch_size),
         seq_len: auto_config.training_params.seq_len,
         training_params: Some(auto_config.training_params),
         max_memory_fraction: 0.80,
@@ -373,8 +373,10 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     // Last round's elapsed time (for poll delay estimation).
     let mut result_elapsed: f64 = 0.0;
     // Auto-calibrated batch size and gradient accumulation steps.
-    // batch_size = micro_batch_size * grad_accum_steps = effective_batch_size (constant).
-    let effective_batch_size = config.batch_size; // target from config (default 4)
+    // If user specified batch_size (via toml or force_batch_size), use it.
+    // Otherwise auto-detect from VRAM during calibration.
+    let user_batch_size = config.batch_size.or(config.force_batch_size);
+    let mut effective_batch_size = user_batch_size.unwrap_or(4); // provisional, updated by auto-detect
     let mut batch_size = effective_batch_size;
     let mut grad_accum_steps: usize = 1;
     let mut batch_calibrated = false;
@@ -555,9 +557,10 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             }
 
             // Calibrate batch_size + benchmark via subprocess (GPU) or memory estimate (CPU)
-            if let Some(forced_bs) = config.force_batch_size {
+            if let Some(forced_bs) = user_batch_size {
                 batch_size = forced_bs;
-                grad_accum_steps = effective_batch_size / forced_bs;
+                effective_batch_size = forced_bs;
+                grad_accum_steps = 1;
                 batch_calibrated = true;
                 h_mini = min_h; // will be refined from first round timing
                 info!("Forced batch_size={forced_bs} (skipping calibration), grad_accum={grad_accum_steps}");
@@ -568,9 +571,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     let estimated_bs = trainer::estimate_batch_size_from_vram(
                         vram, model_weight_bytes, config.seq_len,
                     );
-                    // Use VRAM estimate directly — don't cap at config.batch_size
                     let bs = estimated_bs.max(1);
-                    let accum = 1usize; // no grad accumulation needed if VRAM allows full batch
+                    effective_batch_size = bs;
+                    let accum = 1usize;
                     info!(
                         "VRAM-based batch estimate: {vram} MiB VRAM → batch_size={bs}, grad_accum={}",
                         accum.max(1),
@@ -612,7 +615,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
 
             if !use_gpu {
                 config.force_cpu = true;
-                if config.force_batch_size.is_none() {
+                if user_batch_size.is_none() {
                     h_mini = min_h;
                 }
                 info!("Using CPU, starting with H_mini = {h_mini} (will refine from first round timing)");
@@ -737,7 +740,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         let result = if !config.force_cpu {
             // GPU training with watchdog (timeout + catch_unwind)
             // force_batch_size without calibration: use generous default (no hang risk, just slow first round)
-            let sps = gpu_secs_per_step.unwrap_or(if config.force_batch_size.is_some() { 300.0 } else { 10.0 });
+            let sps = gpu_secs_per_step.unwrap_or(if user_batch_size.is_some() { 300.0 } else { 10.0 });
             let mem_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let mem_abort_clone = mem_abort.clone();
             // Move error_buffer into watchdog, get it back after training
@@ -809,7 +812,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             match watchdog_result {
                 Ok(r) => Ok(r),
                 Err(trainer::TrainingFailure::GpuHung { timeout_secs }) => {
-                    if config.force_batch_size.is_some() {
+                    if user_batch_size.is_some() {
                         // force_batch_size means user trusts GPU; retry instead of falling back
                         warn!(
                             "GPU hung during training (timeout {timeout_secs:.0}s) — retrying on GPU (force_batch_size set)"
@@ -825,7 +828,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     return Err(anyhow::anyhow!("GPU training failed (hung, timeout {timeout_secs:.0}s), refusing silent CPU fallback"));
                 }
                 Err(trainer::TrainingFailure::GpuPanic { message }) => {
-                    if config.force_batch_size.is_some() {
+                    if user_batch_size.is_some() {
                         // OOM recovery with force_batch_size: halve batch_size, double grad_accum
                         if batch_size > 1 {
                             let old_bs = batch_size;
@@ -1584,7 +1587,7 @@ async fn run_eval(config: &NodeConfig, checkpoints: &[String], num_batches: u64)
     let (manifest, data_cache) = data::DataLoader::load_manifest(&storage, &cache_dir).await?;
     let mut data_loader = data::DataLoader::from_assignment(
         &storage, &manifest, &data_cache, &[0],
-        config.seq_len, config.batch_size,
+        config.seq_len, config.batch_size.unwrap_or(4),
     ).await?;
 
     let device: GpuDevice = Default::default();
@@ -1617,7 +1620,7 @@ async fn run_eval(config: &NodeConfig, checkpoints: &[String], num_batches: u64)
         for _ in 0..num_batches {
             let tokens = data_loader.next_batch();
             let batch = Tensor::<GpuBackend, 2, Int>::from_data(
-                TensorData::new(tokens, [config.batch_size, config.seq_len]),
+                TensorData::new(tokens, [config.batch_size.unwrap_or(4), config.seq_len]),
                 &device,
             );
             let loss = compute_lm_loss(&module, &rope_cos, &rope_sin, batch);

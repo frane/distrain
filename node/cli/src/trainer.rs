@@ -887,7 +887,7 @@ pub async fn stress_test_gpu(
     timeout_secs: u64,
 ) -> Result<f64, TrainingFailure> {
     let ckpt_path = checkpoint_path.to_path_buf();
-    let batch_size = config.batch_size;
+    let batch_size = config.batch_size.unwrap_or(4);
     let seq_len = config.seq_len;
 
     let gpu_task = tokio::task::spawn_blocking(move || {
@@ -1026,7 +1026,7 @@ pub async fn stress_test_cpu(
     // Scale timing estimate to real batch_size/seq_len proportionally.
     let bench_batch = 1usize;
     let bench_seq = 128usize.min(model_config.max_seq_len);
-    let scale_factor = (config.batch_size * config.seq_len) as f64 / (bench_batch * bench_seq) as f64;
+    let scale_factor = (config.batch_size.unwrap_or(4) * config.seq_len) as f64 / (bench_batch * bench_seq) as f64;
 
     let start = Instant::now();
     let tokens: Vec<i64> = (0..(bench_batch * bench_seq))
@@ -1051,7 +1051,7 @@ pub async fn stress_test_cpu(
     let secs_per_step = bench_secs * scale_factor;
     info!(
         "CPU benchmark: {bench_secs:.3}s for batch=1/seq=128, estimated {secs_per_step:.3}s/step at batch={}/seq={}",
-        config.batch_size, config.seq_len,
+        config.batch_size.unwrap_or(4), config.seq_len,
     );
     Ok(secs_per_step)
 }
