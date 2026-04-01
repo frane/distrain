@@ -149,9 +149,13 @@ pub enum GpuVerdict {
     NoAdapter,
 }
 
-/// Minimum VRAM (in MiB) required for GPU training. GPUs below this threshold
-/// should fall back to CPU. 4 GiB = 4096 MiB.
-pub const MIN_VRAM_MB: u64 = 4096;
+/// Minimum VRAM (in MiB) required for GPU training, given model weight bytes.
+/// Needs ~5x weight bytes (weights + optimizer + gradients) plus headroom for activations.
+pub fn min_vram_mb(model_weight_bytes: u64) -> u64 {
+    let model_overhead_mb = model_weight_bytes * 5 / (1024 * 1024);
+    // Need model overhead + at least 512MB for activations of batch_size=1
+    (model_overhead_mb + 512).max(1024)
+}
 
 /// Estimate maximum batch size from known VRAM.
 ///
@@ -159,7 +163,7 @@ pub const MIN_VRAM_MB: u64 = 4096;
 /// require roughly 5x the raw weight bytes. The remaining VRAM is split among
 /// activation memory for each batch item.
 ///
-/// Returns a batch size in [1, 16].
+/// Returns a batch size based on available VRAM (no artificial cap).
 pub fn estimate_batch_size_from_vram(vram_mb: u64, model_weight_bytes: u64, seq_len: usize) -> usize {
     // Model needs: weights (BF16) + optimizer (FP32 x2) + gradients (BF16) ≈ 5x weight bytes
     let model_overhead = model_weight_bytes * 5;
@@ -167,7 +171,7 @@ pub fn estimate_batch_size_from_vram(vram_mb: u64, model_weight_bytes: u64, seq_
     let activation_per_item = (seq_len * 4 * 1024) as u64; // rough estimate
     let available = (vram_mb * 1024 * 1024).saturating_sub(model_overhead);
     let max_batch = (available / activation_per_item.max(1)).max(1) as usize;
-    max_batch.min(16) // cap at 16
+    max_batch // no artificial cap — VRAM is the limit
 }
 
 /// Probe for a GPU adapter. Tries CUDA first (if compiled in), then wgpu, then gives up.
@@ -195,9 +199,6 @@ pub async fn probe_gpu() -> GpuVerdict {
 
                 if let Some(vram) = vram_mb {
                     info!("CUDA GPU detected: {name} ({vram} MiB VRAM)");
-                    if vram < MIN_VRAM_MB {
-                        warn!("CUDA GPU '{name}' has only {vram} MiB VRAM (minimum {MIN_VRAM_MB} MiB) — will likely fail for training");
-                    }
                 } else {
                     info!("CUDA GPU detected: {name} (VRAM unknown)");
                 }

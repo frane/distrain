@@ -21,6 +21,11 @@ MIN_INNER_STEPS="${MIN_INNER_STEPS:-50}"
 MAX_INNER_STEPS="${MAX_INNER_STEPS:-500}"
 PUSH_INTERVAL="${PUSH_INTERVAL:-60.0}"
 
+# Auto-detect available disk space for cache (80% of free space on /workspace)
+DISK_FREE_KB=$(df /workspace 2>/dev/null | tail -1 | awk '{print $4}')
+MAX_CACHE_GB=$(( ${DISK_FREE_KB:-20000000} / 1024 / 1024 * 80 / 100 ))
+MAX_CACHE_GB=$(( MAX_CACHE_GB > 1 ? MAX_CACHE_GB : 1 ))
+
 cat > /workspace/node.toml << EOF
 coordinator_url = "${COORDINATOR_URL}"
 api_key = ""
@@ -29,7 +34,7 @@ target_push_interval_secs = ${PUSH_INTERVAL}
 min_inner_steps = ${MIN_INNER_STEPS}
 max_inner_steps = ${MAX_INNER_STEPS}
 cache_dir = "/workspace/cache"
-max_cache_gb = 20
+max_cache_gb = ${MAX_CACHE_GB}
 seq_len = 512
 EOF
 

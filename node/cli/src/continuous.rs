@@ -206,15 +206,14 @@ async fn delta_uploader(
                     // Store measured bandwidth for adaptive compression
                     measured_bandwidth_bps.store(bps as u64, Ordering::Relaxed);
 
-                    // Recommend H_mini based on bandwidth
-                    let mb_per_sec = bps / 1e6;
-                    let new_h = if mb_per_sec > 100.0 {
-                        20
-                    } else if mb_per_sec > 10.0 {
-                        50
-                    } else {
-                        100
-                    };
+                    // Recommend H_mini based on bandwidth: target ~10s upload time.
+                    // h_mini = steps that produce a delta uploadable in 10s.
+                    // delta_bytes ≈ this upload's size. Steps = pkg.inner_steps.
+                    // If upload took T seconds, then 10s would allow (10/T) × steps.
+                    let target_upload_secs = 10.0f64;
+                    let steps = pkg.push_body.inner_steps as f64;
+                    let new_h = ((target_upload_secs / secs) * steps)
+                        .clamp(10.0, 500.0) as u64;
                     recommended_h_mini.store(new_h, Ordering::Relaxed);
 
                     upload_ok = true;

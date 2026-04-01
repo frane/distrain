@@ -512,10 +512,10 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
 
                         // VRAM threshold check for CUDA GPUs with known VRAM
                         if let Some(vram) = vram_mb {
-                            if vram < trainer::MIN_VRAM_MB {
+                            if vram < trainer::min_vram_mb(model_weight_bytes) {
                                 warn!(
                                     "GPU '{name}' has {vram} MiB VRAM (minimum {} MiB) — using CPU",
-                                    trainer::MIN_VRAM_MB,
+                                    trainer::min_vram_mb(model_weight_bytes),
                                 );
                             }
                         }
@@ -537,7 +537,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                                 );
                             }
                         }
-                        if vram_mb.map_or(false, |v| v < trainer::MIN_VRAM_MB) {
+                        if vram_mb.map_or(false, |v| v < trainer::min_vram_mb(model_weight_bytes)) {
                             // VRAM below minimum threshold — skip GPU
                         } else if is_integrated && max_buffer_size < model_weight_bytes * 4 {
                             // skip
