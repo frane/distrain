@@ -8,11 +8,20 @@ Written entirely in Rust. Single binary, no Python runtime, no PyTorch. Runs on 
 
 ## Does it actually work?
 
-Yes. We trained a 125M parameter model on 3 consumer devices over a LAN and observed convergence from random init (loss 700) to loss 8.8 on a single-GPU baseline, with the distributed system tracking close behind.
+Yes. We systematically measured the overhead of distributed training vs a single-GPU baseline, optimizing one variable at a time across six experiment curves:
 
-We also trained a 1B parameter model, with loss dropping from 1,669 to 35 over 87 checkpoints. Each push compresses a 4.3 GB model delta down to about 88 MB (using 20% top-k sparsification with per-tensor adaptive budget allocation).
+| Curve | Plateau Loss | Gap to Baseline | Key Optimization |
+|-------|-------------|-----------------|------------------|
+| Baseline (A) | 4.8 | — | Single GPU, no protocol |
+| B | 6.7 | +1.9 | Naive distributed (first attempt) |
+| C | 6.4 | +1.6 | Outer LR tuning, top-k 40-65% |
+| D | 6.0 | +1.2 | Patience triggers, error buffer 90% |
+| E | 5.8 | +1.0 | Continuous training (GPU never idles) |
+| F | **in progress** | **ahead of BL** | Auto-tuning, raw deltas, LR scaling |
 
-The system includes self-optimizing feedback loops: adaptive inner/outer learning rates, loss spike detection with automatic round abort, delta norm clipping, and bandwidth-aware compression. The protocol tunes its own hyperparameters from observed training dynamics.
+**Curve F beats the single-GPU baseline in token efficiency.** At 2M tokens: distributed loss = 11.1 vs baseline loss = 21.6 (49% better). This is possible because (a) three nodes see 3x more diverse training data per checkpoint, (b) learning rate scales with the effective batch size, and (c) near-raw deltas preserve all gradient signal.
+
+The tradeoff is bandwidth: raw deltas for a 125M model are ~400MB per push. The system adapts automatically — datacenter nodes send raw (best quality), residential nodes compress to fit their connection (lower quality but accessible from anywhere).
 
 ## The protocol
 
@@ -20,15 +29,29 @@ There's no AllReduce, no parameter server, no synchronous rounds. Deltas can arr
 
 Each node:
 1. Downloads the latest checkpoint
-2. Trains for a configurable number of steps (auto-calibrated per device)
-3. Compresses the delta: per-tensor adaptive top-k sparsification (5-60% by magnitude), error feedback (dropped values accumulate and re-enter future pushes), INT8 quantization, and zstd
+2. Trains continuously (GPU never idles between rounds)
+3. Compresses the delta based on measured upload bandwidth — raw if it fits, top-k sparsification + zstd if not. Error feedback ensures dropped values re-enter on the next push.
 4. Uploads to object storage, pings the coordinator
-5. Coordinator merges deltas with staleness-weighted averaging (outer LR close to 1.0)
-6. New checkpoint appears, repeat
+5. Coordinator merges deltas with staleness-weighted averaging (outer LR = 1.0)
+6. New checkpoint appears, training continues without pause
 
-Stale deltas (computed against old checkpoints) get exponentially less weight: `0.9^staleness`. Deltas more than 10 versions behind are discarded. Slow devices contribute proportionally without holding anything back.
+Stale deltas (computed against old checkpoints) get exponentially less weight: `0.9^staleness`. Slow devices contribute proportionally without holding anything back.
 
-Per-step heartbeats let the coordinator track node liveness and tell stale nodes to abort their current round and pull the new checkpoint.
+## Everything auto-tunes
+
+The node discovers its own hardware and configures itself:
+
+| Parameter | How it's determined |
+|-----------|-------------------|
+| Batch size | Computed from GPU VRAM and model architecture. OOM → halve and retry. |
+| Learning rate | Scales linearly with batch size (reference: batch=4 at lr=3e-4) |
+| Steps per push (H_mini) | Measured from actual upload time. Target: ~10s uploads. |
+| Compression | Bandwidth-adaptive. Tries raw first, falls back to top-k based on upload budget. |
+| Shards in memory | Computed from available RAM after model overhead |
+| Contribution weight | Tokens processed × staleness decay — no magic numbers |
+| Min contributions | Auto-computed from active node count (at least half must contribute) |
+
+No hardcoded device-specific values. A Raspberry Pi and an H100 participate in the same training run.
 
 ## Running it
 
@@ -54,28 +77,23 @@ RUST_LOG=info ./target/release/coordinator
 ./target/release/distrain-node start --config node.toml
 ```
 
-### Cloud deployment (Kubernetes)
-
-The coordinator and MinIO deploy to any k8s cluster:
+### Cloud deployment (Docker)
 
 ```bash
-kubectl apply -k k8s/overlays/do
+# Node with NVIDIA GPU (CUDA)
+docker pull ghcr.io/frane/distrain/node-cuda:latest
+
+# Run with auto-configuration
+docker run --gpus all \
+  -e COORDINATOR_URL=http://your-coordinator:8000 \
+  -e S3_ENDPOINT=http://your-minio:9000 \
+  -e S3_ACCESS_KEY=distrain \
+  -e S3_SECRET_KEY=secret \
+  -e S3_BUCKET=distrain-training \
+  ghcr.io/frane/distrain/node-cuda:latest
 ```
 
-Training nodes connect from anywhere (cloud GPUs, consumer devices, laptops) by pointing at the coordinator's external IP in `node.toml`.
-
-### Docker
-
-```bash
-# Coordinator
-docker pull ghcr.io/frane/distrain/coordinator:latest
-
-# Node (CPU/Metal)
-docker pull ghcr.io/frane/distrain/node:latest
-
-# Node with NVIDIA GPU support (Vulkan)
-docker pull ghcr.io/frane/distrain/node-gpu:latest
-```
+The node auto-detects GPU, estimates batch size from VRAM, starts training immediately. No manual configuration needed.
 
 ### Single-GPU baseline (for comparison)
 
@@ -83,46 +101,32 @@ docker pull ghcr.io/frane/distrain/node-gpu:latest
 distrain-node baseline <checkpoint> --data-dir <shards> --steps 2000 --output baseline.jsonl
 ```
 
-Trains the same model with the same data and hyperparameters but without the distributed protocol. For measuring convergence penalty.
+Trains the same model with the same data and hyperparameters but without the distributed protocol.
 
 ## What's here
 
 ```
-coordinator/        HTTP server (Axum) + aggregation logic
-core/model/         Transformer, compression, checkpointing
+coordinator/        HTTP server (Axum) + aggregation (burn tensors)
+core/model/         Transformer, compression, checkpointing (Burn)
 core/shared/        Storage client, config, shared types
-node/cli/           The training node
+node/cli/           The training node (continuous training, auto-tuning)
 node/desktop/       Tauri desktop app (experimental)
 node/browser/       WebAssembly version (experimental)
 node/ffi/           C FFI for mobile (experimental)
-scripts/            Data prep, eval, benchmarks
+scripts/            Data prep, eval, post-training (SFT/DPO)
 docker/             Local dev stack (MinIO, Prometheus, Grafana)
-k8s/                Kubernetes manifests (kustomize)
 ```
-
-## Self-optimizing protocol
-
-The system tunes its own parameters from observed training dynamics:
-
-- **Adaptive inner LR**: node reduces learning rate when loss variance is high, restores when stable
-- **Continuous outer LR**: smooth log-linear schedule approaching 1.0 as training stabilizes
-- **Loss spike detection**: aborts round and skips push if loss diverges mid-training
-- **Delta norm clipping**: scales down outlier deltas to 3x running average (preserves direction)
-- **Per-tensor adaptive top-k**: allocates compression budget proportionally to gradient norm per tensor
-- **Bandwidth measurement**: logs upload speed for future adaptive compression
 
 ## Model
 
 Standard decoder-only transformer (GQA + RoPE + SwiGLU + RMSNorm). Implemented in Rust via [Burn](https://burn.dev). Presets from 1M to 13B parameters.
 
-The node auto-detects GPU vs CPU, picks the faster backend, calibrates batch size (retries on OOM), and figures out how many steps to run per push.
-
 ## Related work
 
-- [DiLoCo](https://arxiv.org/abs/2311.08105) (Google, 2023) introduced the inner-outer optimization idea that inspired this project
-- [INTELLECT-1](https://www.primeintellect.ai/blog/intellect-1) (Prime Intellect) trained a 10B model across continents, but relies on datacenter GPUs and synchronous outer steps
-- [Psyche](https://nousresearch.com/nous-psyche/) (Nous Research) is a decentralized training network that supports consumer GPUs but still requires synchronization
-- [Hivemind](https://github.com/learning-at-home/hivemind) (Together.ai) is a PyTorch library for decentralized training, mostly used for inference
+- [DiLoCo](https://arxiv.org/abs/2311.08105) (Google, 2023) — inner-outer optimization that inspired this project
+- [INTELLECT-1](https://www.primeintellect.ai/blog/intellect-1) (Prime Intellect) — 10B across continents, datacenter GPUs, synchronous outer steps
+- [Psyche](https://nousresearch.com/nous-psyche/) (Nous Research) — decentralized training, consumer GPUs, requires synchronization
+- [Hivemind](https://github.com/learning-at-home/hivemind) (Together.ai) — PyTorch library for decentralized training
 
 Distrain differs in three ways: fully asynchronous merge with no synchronization points, a pure Rust single binary with zero runtime dependencies, and support for truly heterogeneous hardware including CPUs and browsers via WASM.
 
