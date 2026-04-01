@@ -543,51 +543,30 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                 h_mini = min_h; // will be refined from first round timing
                 info!("Forced batch_size={forced_bs} (skipping calibration), grad_accum={grad_accum_steps}");
             } else if use_gpu {
-                // If we have VRAM info (CUDA), estimate batch size directly — avoids
-                // expensive subprocess probing. Fall back to subprocess if VRAM unknown.
+                // Use VRAM estimate as starting batch size. No subprocess probing —
+                // real training will catch OOM and reduce batch_size automatically.
+                // secs_per_step is measured from the first actual training round.
                 if let Some(vram) = gpu_vram_mb {
                     let estimated_bs = trainer::estimate_batch_size_from_vram(
                         vram, model_weight_bytes, config.seq_len,
                     );
-                    let bs = estimated_bs.max(1);
-                    effective_batch_size = bs;
-                    let accum = 1usize;
-                    info!(
-                        "VRAM-based batch estimate: {vram} MiB VRAM → batch_size={bs}, grad_accum={}",
-                        accum.max(1),
-                    );
-                    batch_size = bs;
-                    grad_accum_steps = accum.max(1);
+                    batch_size = estimated_bs.max(1);
+                    effective_batch_size = batch_size;
+                    grad_accum_steps = 1;
                     batch_calibrated = true;
-                    // Still need subprocess for timing (secs_per_step), so run stress test
-                    info!("Running GPU timing benchmark (subprocess)...");
-                    let (_, _, cal_sps) = trainer::calibrate_batch_size(
-                        &ckpt_path, config.seq_len, true, effective_batch_size,
-                    ).await;
-                    if let Some(sps) = cal_sps {
-                        gpu_secs_per_step = Some(sps);
-                        h_mini = ((target_interval / sps) as u64).clamp(min_h, max_h);
-                        info!("GPU timing: {sps:.3}s/step, H_mini={h_mini}");
-                    }
+                    // H_mini from first round timing (use min_h as starting point)
+                    h_mini = min_h;
+                    info!(
+                        "VRAM-based batch_size={batch_size} ({vram} MiB). Will auto-reduce on OOM.",
+                    );
                 } else {
-                    info!("Calibrating GPU batch_size and timing (subprocess)...");
-                    let (cal_bs, cal_accum, cal_sps) = trainer::calibrate_batch_size(
-                        &ckpt_path, config.seq_len, true, effective_batch_size,
-                    ).await;
-
-                    if cal_bs == 0 {
-                        warn!("GPU batch_size calibration failed, falling back to CPU");
-                        use_gpu = false;
-                    } else {
-                        batch_size = cal_bs;
-                        grad_accum_steps = cal_accum;
-                        batch_calibrated = true;
-                        if let Some(sps) = cal_sps {
-                            gpu_secs_per_step = Some(sps);
-                            h_mini = ((target_interval / sps) as u64).clamp(min_h, max_h);
-                            info!("GPU calibrated: batch_size={batch_size}, grad_accum={grad_accum_steps}, {sps:.3}s/step, H_mini={h_mini}");
-                        }
-                    }
+                    // No VRAM info — try batch_size=4 as starting point, OOM handler will adjust
+                    batch_size = 4;
+                    effective_batch_size = batch_size;
+                    grad_accum_steps = 1;
+                    batch_calibrated = true;
+                    h_mini = min_h;
+                    info!("No VRAM info — starting batch_size=4, will auto-reduce on OOM");
                 }
             }
 

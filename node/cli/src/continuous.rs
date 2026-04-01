@@ -775,7 +775,7 @@ pub async fn run_continuous_training(
     cache_dir: PathBuf,
     node_id: String,
     mut h_mini: u64,
-    batch_size: usize,
+    mut batch_size: usize,
     grad_accum_steps: usize,
     manifest: &crate::data::Manifest,
     data_cache: PathBuf,
@@ -957,7 +957,7 @@ pub async fn run_continuous_training(
         let eb_in = std::mem::take(&mut error_buffer);
 
         // Run training on blocking thread
-        let (eb_out, new_seq_num) = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             continuous_training_loop(
                 cont_params,
                 checkpoint_rx,
@@ -966,14 +966,23 @@ pub async fn run_continuous_training(
                 heartbeat_url,
             )
         })
-        .await
-        .unwrap_or_else(|e| {
+        .await;
+
+        let panicked = result.is_err();
+        let (eb_out, new_seq_num) = result.unwrap_or_else(|e| {
             error!("Training thread panicked: {e}");
             (ErrorBuffer::new(), seq_num)
         });
 
         error_buffer = eb_out;
         seq_num = new_seq_num;
+
+        // If training panicked (likely OOM), reduce batch size and retry
+        if panicked {
+            let old_bs = batch_size;
+            batch_size = (batch_size * 3 / 4).max(1);
+            warn!("Training panicked — reducing batch_size: {old_bs} → {batch_size}");
+        }
 
         // H_mini auto-tune based on measured bandwidth
         let recommended = recommended_h_mini.load(Ordering::Relaxed);
