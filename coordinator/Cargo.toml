@@ -7,9 +7,15 @@ edition = "2021"
 name = "coordinator"
 path = "src/main.rs"
 
+[features]
+default = []
+cuda = ["distrain-model/cuda"]
+
 [dependencies]
 distrain-shared = { path = "../core/shared" }
 distrain-model = { path = "../core/model" }
+burn = { workspace = true }
+burn-ndarray = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }

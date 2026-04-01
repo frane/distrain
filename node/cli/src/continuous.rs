@@ -359,13 +359,19 @@ fn continuous_training_loop(
         )))
         .init::<GpuBackend, DistrainTransformerModule<GpuBackend>>();
 
-    let lr_max = params.training_params.lr_max;
-    let lr_min = params.training_params.lr_min;
-    let h_mini = params.h_mini;
-    let seq_len = params.seq_len;
+    let micro_batch_size = params.batch_size;
     let grad_accum_steps = params.grad_accum_steps;
 
-    let micro_batch_size = params.batch_size;
+    // Scale learning rate linearly with batch size (reference: batch=4).
+    let reference_batch = 4usize;
+    let effective_batch = micro_batch_size * grad_accum_steps;
+    let lr_scale = effective_batch as f64 / reference_batch as f64;
+    let lr_max = params.training_params.lr_max * lr_scale;
+    let lr_min = params.training_params.lr_min * lr_scale;
+    info!("LR scaled {lr_scale:.1}x for batch={effective_batch}: lr_max={lr_max:.2e}");
+
+    let h_mini = params.h_mini;
+    let seq_len = params.seq_len;
 
     let effective_batch = micro_batch_size * grad_accum_steps;
 

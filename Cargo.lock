@@ -3027,6 +3027,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
+ "burn",
+ "burn-ndarray",
  "chrono",
  "distrain-model",
  "distrain-shared",

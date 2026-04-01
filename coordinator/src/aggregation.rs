@@ -1,21 +1,109 @@
-//! Pure Rust aggregation — replaces the Python subprocess.
+//! GPU-accelerated aggregation.
 //!
-//! Downloads deltas from R2, validates, computes weighted average,
-//! applies Nesterov outer optimizer, uploads new checkpoint. All in-memory.
+//! Downloads deltas from R2, validates, computes weighted average and
+//! Nesterov step using burn tensors (GPU when CUDA feature enabled,
+//! CPU ndarray otherwise). Uploads new checkpoint.
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use burn::tensor::{Tensor, TensorData};
+use burn_ndarray::NdArray;
 use distrain_model::checkpoint::{
     load_safetensors_map_from_bytes, load_safetensors_shapes_from_bytes,
     save_state_dict_safetensors_bytes,
 };
 use distrain_model::compression::validate_delta;
-use distrain_model::training::{weighted_average_deltas, NesterovOuterOptimizer};
 use distrain_shared::paths;
 use distrain_shared::storage::Storage;
 use distrain_shared::types::AccumulatorState;
 use tracing::{info, warn};
+
+// Use CUDA backend if available, otherwise NdArray (CPU)
+#[cfg(feature = "cuda")]
+type AggBackend = burn_cuda::Cuda;
+#[cfg(not(feature = "cuda"))]
+type AggBackend = NdArray;
+
+/// GPU-accelerated weighted average of deltas using burn tensors.
+fn weighted_average_gpu(
+    deltas: &[(HashMap<String, Vec<f32>>, f64)],
+) -> Option<HashMap<String, Vec<f32>>> {
+    if deltas.is_empty() {
+        return None;
+    }
+    let total_weight: f64 = deltas.iter().map(|(_, w)| w).sum();
+    if total_weight == 0.0 {
+        return None;
+    }
+
+    let device = burn::tensor::Device::<AggBackend>::default();
+    let keys: Vec<String> = deltas[0].0.keys().cloned().collect();
+    let mut avg: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for key in &keys {
+        let len = deltas[0].0[key].len();
+        let mut acc: Tensor<AggBackend, 1> = Tensor::zeros([len], &device);
+
+        for (delta, weight) in deltas {
+            let w = (*weight / total_weight) as f32;
+            if let Some(v) = delta.get(key) {
+                let t = Tensor::from_data(TensorData::new(v.clone(), [len]), &device);
+                acc = acc + t * w;
+            }
+        }
+
+        let data = acc.into_data();
+        let values: Vec<f32> = data.to_vec().unwrap();
+        avg.insert(key.clone(), values);
+    }
+
+    Some(avg)
+}
+
+/// GPU-accelerated Nesterov outer optimizer step.
+fn nesterov_step_gpu(
+    checkpoint: &mut HashMap<String, Vec<f32>>,
+    avg_delta: &HashMap<String, Vec<f32>>,
+    velocity: &mut Option<HashMap<String, Vec<f32>>>,
+    lr: f64,
+    momentum: f64,
+) {
+    let device = burn::tensor::Device::<AggBackend>::default();
+    let lr = lr as f32;
+    let mu = momentum as f32;
+
+    if velocity.is_none() {
+        *velocity = Some(
+            avg_delta
+                .iter()
+                .map(|(k, v)| (k.clone(), vec![0.0f32; v.len()]))
+                .collect(),
+        );
+    }
+
+    let vel = velocity.as_mut().unwrap();
+
+    for (name, params) in checkpoint.iter_mut() {
+        if let Some(delta) = avg_delta.get(name) {
+            let v = vel.get_mut(name).unwrap();
+            let len = params.len();
+
+            let vel_t = Tensor::<AggBackend, 1>::from_data(TensorData::new(v.clone(), [len]), &device);
+            let delta_t = Tensor::from_data(TensorData::new(delta.clone(), [len]), &device);
+            let params_t = Tensor::from_data(TensorData::new(params.clone(), [len]), &device);
+
+            // v = mu*v + delta
+            let new_vel = vel_t * mu + delta_t.clone();
+            // params -= lr * (mu*v + delta)
+            let update = new_vel.clone() * mu + delta_t;
+            let new_params = params_t - update * lr;
+
+            *v = new_vel.into_data().to_vec().unwrap();
+            *params = new_params.into_data().to_vec().unwrap();
+        }
+    }
+}
 
 /// Aggregation metadata written alongside the new checkpoint.
 #[derive(serde::Serialize)]
@@ -255,9 +343,11 @@ pub async fn run_aggregation(
         anyhow::bail!("No valid deltas to aggregate");
     }
 
-    // 4. Compute weighted average
-    let avg_delta = weighted_average_deltas(&delta_weight_pairs)
+    // 4. Compute weighted average (GPU-accelerated)
+    let t_avg = std::time::Instant::now();
+    let avg_delta = weighted_average_gpu(&delta_weight_pairs)
         .context("Failed to compute weighted average")?;
+    info!("Weighted average: {:.2}s", t_avg.elapsed().as_secs_f64());
 
     // Compute delta norm for metadata
     let delta_norm_sq: f64 = avg_delta
@@ -279,12 +369,17 @@ pub async fn run_aggregation(
         "Avg delta norm={delta_norm:.4}, outer_lr={outer_lr}, outer_momentum={outer_momentum:.3}"
     );
 
-    // 5. Apply Nesterov outer optimizer step
-    let mut outer_opt = NesterovOuterOptimizer::new(outer_lr, outer_momentum);
-    if let Some(vel) = velocity_state {
-        outer_opt.load_state_dict(vel);
-    }
-    outer_opt.step(&mut checkpoint, &avg_delta);
+    // 5. Apply Nesterov outer optimizer step (GPU-accelerated)
+    let t_nesterov = std::time::Instant::now();
+    // Convert velocity state from "velocity.xxx" prefixed keys to bare keys
+    let mut velocity: Option<HashMap<String, Vec<f32>>> = velocity_state.map(|state| {
+        state
+            .into_iter()
+            .filter_map(|(k, v)| k.strip_prefix("velocity.").map(|s| (s.to_string(), v)))
+            .collect()
+    });
+    nesterov_step_gpu(&mut checkpoint, &avg_delta, &mut velocity, outer_lr, outer_momentum);
+    info!("Nesterov step: {:.2}s", t_nesterov.elapsed().as_secs_f64());
 
     // 6. Upload new checkpoint
     let new_ckpt_bytes = save_state_dict_safetensors_bytes(&checkpoint, &shapes)
@@ -295,7 +390,11 @@ pub async fn run_aggregation(
         .context("Failed to upload new checkpoint")?;
 
     // 7. Upload optimizer velocity state as safetensors
-    let vel_state = outer_opt.state_dict();
+    let vel_state: HashMap<String, Vec<f32>> = velocity
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, v)| (format!("velocity.{k}"), v))
+        .collect();
     if !vel_state.is_empty() {
         let vel_shapes: HashMap<String, Vec<usize>> = vel_state
             .iter()
