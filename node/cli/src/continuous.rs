@@ -329,8 +329,9 @@ fn continuous_training_loop(
     checkpoint_rx: std::sync::mpsc::Receiver<CheckpointSignal>,
     delta_tx: tokio::sync::mpsc::Sender<DeltaPackage>,
     mut error_buffer: ErrorBuffer,
+    mut lr_error_buffer: distrain_model::lowrank::LowRankErrorBuffer,
     heartbeat_url: String,
-) -> (ErrorBuffer, u64) {
+) -> (ErrorBuffer, distrain_model::lowrank::LowRankErrorBuffer, u64) {
     let device: GpuDevice = Default::default();
     let mut seq_num: u64 = params.initial_seq_num;
 
@@ -339,7 +340,7 @@ fn continuous_training_loop(
         Ok(p) => p,
         Err(e) => {
             error!("Failed to load initial checkpoint: {e:#}");
-            return (error_buffer, seq_num);
+            return (error_buffer, lr_error_buffer, seq_num);
         }
     };
 
@@ -418,6 +419,7 @@ fn continuous_training_loop(
                         &module,
                         &round_start_params,
                         &mut error_buffer,
+                    &mut lr_error_buffer,
                         mean_loss,
                         current_version,
                         &params.node_id,
@@ -430,7 +432,7 @@ fn continuous_training_loop(
                         // Best-effort send (don't block training)
                         if delta_tx.blocking_send(pkg).is_err() {
                             warn!("Delta channel closed during checkpoint swap");
-                            return (error_buffer, seq_num);
+                            return (error_buffer, lr_error_buffer, seq_num);
                         }
                     }
                 }
@@ -447,7 +449,7 @@ fn continuous_training_loop(
                     "Checkpoint swap v{current_version} -> v{new_version} in {:.0}ms, returning for data refill",
                     swap_start.elapsed().as_millis()
                 );
-                return (error_buffer, seq_num);
+                return (error_buffer, lr_error_buffer, seq_num);
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 // No new checkpoint, continue training
@@ -462,6 +464,7 @@ fn continuous_training_loop(
                         &module,
                         &round_start_params,
                         &mut error_buffer,
+                    &mut lr_error_buffer,
                         mean_loss,
                         current_version,
                         &params.node_id,
@@ -474,7 +477,7 @@ fn continuous_training_loop(
                         let _ = delta_tx.blocking_send(pkg);
                     }
                 }
-                return (error_buffer, seq_num);
+                return (error_buffer, lr_error_buffer, seq_num);
             }
         }
 
@@ -503,6 +506,7 @@ fn continuous_training_loop(
                     &module,
                     &round_start_params,
                     &mut error_buffer,
+                    &mut lr_error_buffer,
                     mean_loss,
                     current_version,
                     &params.node_id,
@@ -515,7 +519,7 @@ fn continuous_training_loop(
             } {
                 if delta_tx.blocking_send(pkg).is_err() {
                     warn!("Delta channel closed, training loop exiting");
-                    return (error_buffer, seq_num);
+                    return (error_buffer, lr_error_buffer, seq_num);
                 }
             }
 
@@ -545,6 +549,7 @@ fn continuous_training_loop(
                         &module,
                         &round_start_params,
                         &mut error_buffer,
+                    &mut lr_error_buffer,
                         mean_loss,
                         current_version,
                         &params.node_id,
@@ -557,7 +562,7 @@ fn continuous_training_loop(
                         let _ = delta_tx.blocking_send(pkg);
                     }
                 }
-                return (error_buffer, seq_num);
+                return (error_buffer, lr_error_buffer, seq_num);
             }
         };
 
@@ -660,6 +665,7 @@ fn build_delta_package(
     module: &DistrainTransformerModule<GpuBackend>,
     round_start_params: &HashMap<String, Vec<f32>>,
     error_buffer: &mut ErrorBuffer,
+    lr_error_buffer: &mut distrain_model::lowrank::LowRankErrorBuffer,
     mean_loss: f64,
     version: u64,
     node_id: &str,
@@ -674,96 +680,146 @@ fn build_delta_package(
     let delta = compute_outer_delta(round_start_params, &current_params);
 
     let raw_param_bytes: u64 = delta.values().map(|v| v.len() as u64 * 4).sum();
+    let upload_budget = if bandwidth_bps > 0 { bandwidth_bps * 10 } else { 0 }; // 10s target
 
-    let compression_config = if bandwidth_bps == 0 {
-        // No measurement yet, use default adaptive_top_k
-        CompressionConfig {
-            top_k_fraction: adaptive_top_k(mean_loss, None, 0),
-            ..CompressionConfig::default()
-        }
-    } else {
-        let upload_budget = bandwidth_bps * 10; // 10-second upload target
+    // Bandwidth-adaptive compression: raw → low-rank → top-k
+    // Try each tier until one fits the upload budget.
 
-        // Try with top_k = 1.0 (keep everything, just zstd)
+    // Tier 1: Raw delta (top_k=1.0, just zstd). Best quality.
+    if bandwidth_bps > 0 {
         let full_config = CompressionConfig {
             top_k_fraction: 1.0,
             quantize_int8: false,
             ..CompressionConfig::default()
         };
-
-        // Do a trial compression to check size
         let mut trial_eb = error_buffer.clone();
-        match compress_delta(&delta, &shapes, &full_config, &mut trial_eb) {
-            Ok((compressed, _stats)) if (compressed.len() as u64) <= upload_budget => {
+        if let Ok((compressed, _)) = compress_delta(&delta, &shapes, &full_config, &mut trial_eb) {
+            if (compressed.len() as u64) <= upload_budget {
                 info!(
-                    "Bandwidth-adaptive: full delta fits! {}MB <= {}MB budget (bw={:.1} MB/s)",
-                    compressed.len() / (1024 * 1024),
-                    upload_budget / (1024 * 1024),
+                    "Bandwidth-adaptive: raw delta fits! {}MB <= {}MB budget (bw={:.1} MB/s)",
+                    compressed.len() / (1024 * 1024), upload_budget / (1024 * 1024),
                     bandwidth_bps as f64 / 1e6,
                 );
-                full_config
+                // Use raw — apply to real error buffer
+                return match compress_delta(&delta, &shapes, &full_config, error_buffer) {
+                    Ok((compressed, comp_stats)) => build_package(compressed, comp_stats, version, node_id, seq_num, steps, tokens, elapsed_secs, mean_loss),
+                    Err(e) => { warn!("Raw compression failed: {e:#}"); None }
+                };
             }
-            _ => {
-                // Need some sparsification. Use loss-based adaptive but never INT8.
-                let k = adaptive_top_k(mean_loss, Some(upload_budget), raw_param_bytes);
-                info!(
-                    "Bandwidth-adaptive: sparsifying at k={:.1}%, no INT8 (bw={:.1} MB/s)",
-                    k * 100.0,
-                    bandwidth_bps as f64 / 1e6,
-                );
-                CompressionConfig {
-                    top_k_fraction: k,
-                    quantize_int8: false,
-                    ..CompressionConfig::default()
+        }
+    }
+
+    // Tier 2: Low-rank compression. Rank chosen to fit budget.
+    if bandwidth_bps > 0 {
+        // Estimate rank that fits: each rank adds ~(m+n)*4 bytes per tensor.
+        // Start with rank 16, try lower if doesn't fit.
+        for rank in [32, 16, 8, 4] {
+            if let Ok((compressed, lr_stats)) = distrain_model::compression::compress_delta_lowrank(
+                &delta, &shapes, rank, lr_error_buffer,
+            ) {
+                if (compressed.len() as u64) <= upload_budget {
+                    info!(
+                        "Bandwidth-adaptive: low-rank r={rank} fits! {}MB, {:.1}x compression, error={:.4} (bw={:.1} MB/s)",
+                        compressed.len() / (1024 * 1024), lr_stats.compression_ratio,
+                        lr_stats.reconstruction_error, bandwidth_bps as f64 / 1e6,
+                    );
+                    *seq_num += 1;
+                    let delta_key = distrain_shared::paths::delta_path(version, node_id, *seq_num);
+                    let push_body = DeltaPush {
+                        node_id: distrain_shared::types::NodeId(node_id.to_string()),
+                        seq_num: *seq_num,
+                        checkpoint_version: version,
+                        inner_steps: steps,
+                        delta_key: delta_key.clone(),
+                        training_loss: mean_loss,
+                        tokens_processed: tokens,
+                        training_time_secs: elapsed_secs,
+                        compressed_bytes: Some(compressed.len() as u64),
+                        dense_norm: None,
+                        sparse_norm: None,
+                    };
+                    return Some(DeltaPackage {
+                        compressed_bytes: compressed,
+                        delta_key,
+                        push_body,
+                        seq_num: *seq_num,
+                        training_loss: mean_loss,
+                        tokens_processed: tokens,
+                        compression_stats: None,
+                    });
                 }
             }
+        }
+        info!("Bandwidth-adaptive: low-rank didn't fit, falling back to top-k");
+    }
+
+    // Tier 3: Top-k sparsification (always fits, adjustable k)
+    let compression_config = if bandwidth_bps == 0 {
+        CompressionConfig {
+            top_k_fraction: adaptive_top_k(mean_loss, None, 0),
+            ..CompressionConfig::default()
+        }
+    } else {
+        let k = adaptive_top_k(mean_loss, Some(upload_budget), raw_param_bytes);
+        info!("Bandwidth-adaptive: top-k at k={:.1}% (bw={:.1} MB/s)", k * 100.0, bandwidth_bps as f64 / 1e6);
+        CompressionConfig {
+            top_k_fraction: k,
+            quantize_int8: false,
+            ..CompressionConfig::default()
         }
     };
 
     match compress_delta(&delta, &shapes, &compression_config, error_buffer) {
-        Ok((compressed, comp_stats)) => {
-            *seq_num += 1;
-            let delta_key =
-                distrain_shared::paths::delta_path(version, node_id, *seq_num);
-
-            info!(
-                "Compression: dense_norm={:.4}, sparse_norm={:.4}, retention={:.2}%, raw={}MB, compressed={}MB",
-                comp_stats.dense_norm,
-                comp_stats.sparse_norm,
-                comp_stats.retention_ratio * 100.0,
-                comp_stats.raw_param_bytes / (1024 * 1024),
-                comp_stats.compressed_bytes / (1024 * 1024),
-            );
-
-            let push_body = DeltaPush {
-                node_id: distrain_shared::types::NodeId(node_id.to_string()),
-                seq_num: *seq_num,
-                checkpoint_version: version,
-                inner_steps: steps,
-                delta_key: delta_key.clone(),
-                training_loss: mean_loss,
-                tokens_processed: tokens,
-                training_time_secs: elapsed_secs,
-                compressed_bytes: Some(comp_stats.compressed_bytes),
-                dense_norm: Some(comp_stats.dense_norm),
-                sparse_norm: Some(comp_stats.sparse_norm),
-            };
-
-            Some(DeltaPackage {
-                compressed_bytes: compressed,
-                delta_key,
-                push_body,
-                seq_num: *seq_num,
-                training_loss: mean_loss,
-                tokens_processed: tokens,
-                compression_stats: Some(comp_stats),
-            })
-        }
+        Ok((compressed, comp_stats)) => build_package(compressed, comp_stats, version, node_id, seq_num, steps, tokens, elapsed_secs, mean_loss),
         Err(e) => {
             warn!("Compression failed: {e:#}");
             None
         }
     }
+}
+
+fn build_package(
+    compressed: Vec<u8>,
+    comp_stats: CompressionStats,
+    version: u64,
+    node_id: &str,
+    seq_num: &mut u64,
+    steps: u64,
+    tokens: u64,
+    elapsed_secs: f64,
+    mean_loss: f64,
+) -> Option<DeltaPackage> {
+    *seq_num += 1;
+    let delta_key = distrain_shared::paths::delta_path(version, node_id, *seq_num);
+    info!(
+        "Compression: dense_norm={:.4}, sparse_norm={:.4}, retention={:.2}%, raw={}MB, compressed={}MB",
+        comp_stats.dense_norm, comp_stats.sparse_norm,
+        comp_stats.retention_ratio * 100.0,
+        comp_stats.raw_param_bytes / (1024 * 1024),
+        comp_stats.compressed_bytes / (1024 * 1024),
+    );
+    let push_body = DeltaPush {
+        node_id: distrain_shared::types::NodeId(node_id.to_string()),
+        seq_num: *seq_num,
+        checkpoint_version: version,
+        inner_steps: steps,
+        delta_key: delta_key.clone(),
+        training_loss: mean_loss,
+        tokens_processed: tokens,
+        training_time_secs: elapsed_secs,
+        compressed_bytes: Some(comp_stats.compressed_bytes),
+        dense_norm: Some(comp_stats.dense_norm),
+        sparse_norm: Some(comp_stats.sparse_norm),
+    };
+    Some(DeltaPackage {
+        compressed_bytes: compressed,
+        delta_key,
+        push_body,
+        seq_num: *seq_num,
+        training_loss: mean_loss,
+        tokens_processed: tokens,
+        compression_stats: Some(comp_stats),
+    })
 }
 
 // ── Main Entry Point ────────────────────────────────────────────────────
@@ -789,6 +845,7 @@ pub async fn run_continuous_training(
 ) -> Result<()> {
     // Persistent state across restarts of the inner loop
     let mut error_buffer = error_buffer;
+    let mut lr_error_buffer = distrain_model::lowrank::LowRankErrorBuffer::default();
     let mut seq_num: u64 = 0;
     let mut cached_shards: std::collections::HashMap<String, Vec<u16>> = std::collections::HashMap::new();
 
@@ -959,6 +1016,7 @@ pub async fn run_continuous_training(
 
         let heartbeat_url = config.coordinator_url.clone();
         let eb_in = std::mem::take(&mut error_buffer);
+        let lr_eb_in = std::mem::take(&mut lr_error_buffer);
 
         // Run training on blocking thread
         let result = tokio::task::spawn_blocking(move || {
@@ -967,18 +1025,20 @@ pub async fn run_continuous_training(
                 checkpoint_rx,
                 delta_tx,
                 eb_in,
+                lr_eb_in,
                 heartbeat_url,
             )
         })
         .await;
 
         let panicked = result.is_err();
-        let (eb_out, new_seq_num) = result.unwrap_or_else(|e| {
+        let (eb_out, lr_eb_out, new_seq_num) = result.unwrap_or_else(|e| {
             error!("Training thread panicked: {e}");
-            (ErrorBuffer::new(), seq_num)
+            (ErrorBuffer::new(), distrain_model::lowrank::LowRankErrorBuffer::default(), seq_num)
         });
 
         error_buffer = eb_out;
+        lr_error_buffer = lr_eb_out;
         seq_num = new_seq_num;
 
         // If training panicked (likely GPU OOM), reduce batch_size and retry.

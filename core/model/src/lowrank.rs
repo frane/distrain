@@ -13,6 +13,11 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+/// Error buffer for low-rank compression. Wraps HashMap<String, Vec<f32>>.
+/// Accumulates reconstruction residuals across rounds.
+#[derive(Debug, Clone, Default)]
+pub struct LowRankErrorBuffer(pub HashMap<String, Vec<f32>>);
+
 /// A low-rank representation of a tensor: U × V^T ≈ original matrix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LowRankFactor {

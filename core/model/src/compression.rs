@@ -424,13 +424,34 @@ pub fn validate_delta(delta: &HashMap<String, Vec<f32>>) -> std::result::Result<
 }
 
 /// Decompress bytes → dense delta tensors.
+/// Detects format automatically: tries low-rank first, then sparse.
 #[cfg(feature = "zstd-compression")]
 pub fn decompress_delta(data: &[u8]) -> Result<HashMap<String, Vec<f32>>> {
-    // Step 1: zstd decompress
     let json_bytes = zstd::decode_all(data).context("zstd decompression failed")?;
 
-    // Step 2: Deserialize and reconstruct
+    // Try low-rank format first (has "tensors" key with "u","v","m","n","rank")
+    if let Ok(lr_delta) = serde_json::from_slice::<crate::lowrank::LowRankDelta>(&json_bytes) {
+        if !lr_delta.tensors.is_empty() {
+            return Ok(crate::lowrank::decompress_lowrank(&lr_delta));
+        }
+    }
+
+    // Fall back to sparse format
     decompress_delta_json(&json_bytes)
+}
+
+/// Compress delta using low-rank decomposition + zstd.
+#[cfg(feature = "zstd-compression")]
+pub fn compress_delta_lowrank(
+    delta: &HashMap<String, Vec<f32>>,
+    shapes: &HashMap<String, Vec<usize>>,
+    rank: usize,
+    error_buffer: &mut crate::lowrank::LowRankErrorBuffer,
+) -> Result<(Vec<u8>, crate::lowrank::LowRankStats)> {
+    let (lr_delta, stats) = crate::lowrank::compress_lowrank(delta, shapes, rank, &mut error_buffer.0)?;
+    let json_bytes = serde_json::to_vec(&lr_delta).context("Failed to serialize low-rank delta")?;
+    let compressed = zstd::encode_all(json_bytes.as_slice(), 3).context("zstd compression failed")?;
+    Ok((compressed, stats))
 }
 
 #[cfg(test)]
