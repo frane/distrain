@@ -1,16 +1,23 @@
-FROM rust:1.93-bookworm AS builder
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 COPY . .
 
-# Build coordinator and node CLI (node needed for bootstrap)
-RUN cargo build --release -p distrain-coordinator -p distrain-node
+# Build with CUDA for GPU aggregation. Pin CUDA 12.4 for driver compat.
+ENV CUDARC_CUDA_VERSION=12040
+RUN cargo build --release -p distrain-coordinator --features cuda -p distrain-node --features cuda
 
-# Runtime image
-FROM debian:bookworm-slim
+# Runtime — CUDA devel (cubecl compiles kernels at runtime via NVRTC)
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates openssh-server curl libgomp1 \
+    ca-certificates openssh-server curl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
 
