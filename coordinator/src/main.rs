@@ -1,13 +1,13 @@
-//! Distrain Coordinator — stateless API server.
+//! Distrain Coordinator — API server with in-memory state.
 //!
-//! 5 endpoints. All persistent state lives in R2.
-//! Multiple instances can run concurrently (CRDT guarantees convergence).
+//! Accumulator and coordinator state live in memory, flushed to R2 every 30s.
+//! Checkpoint production flushes immediately.
 
 pub mod aggregation;
 pub mod metrics;
 mod routes;
 pub mod stats;
-mod state;
+pub mod state;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -17,10 +17,14 @@ use axum::extract::DefaultBodyLimit;
 use axum::Router;
 use distrain_shared::config::CoordinatorConfig;
 use distrain_shared::storage::Storage;
+use distrain_shared::types::AccumulatorState;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
+
+use crate::state::CoordinatorPersistentState;
 
 /// Shared application state passed to all handlers.
 pub struct AppState {
@@ -28,6 +32,10 @@ pub struct AppState {
     pub config: CoordinatorConfig,
     /// Prevents concurrent aggregation runs.
     pub aggregation_in_progress: AtomicBool,
+    /// In-memory accumulator state. Flushed to R2 periodically.
+    pub accumulator: RwLock<AccumulatorState>,
+    /// In-memory coordinator persistent state. Flushed to R2 periodically.
+    pub coord_state: RwLock<CoordinatorPersistentState>,
 }
 
 #[tokio::main]
@@ -53,11 +61,62 @@ async fn main() -> Result<()> {
     let storage = Storage::new(&config.storage).await?;
     storage.ensure_bucket().await?;
 
-    let state = Arc::new(AppState {
+    // Load initial state from R2 into memory
+    let accumulator = state::load_accumulator(&storage)
+        .await
+        .unwrap_or(AccumulatorState {
+            checkpoint_version: 0,
+            contributions: Vec::new(),
+            first_contribution_at: None,
+            version: 0,
+        });
+    info!(
+        "Loaded accumulator: v{}, {} contributions",
+        accumulator.checkpoint_version,
+        accumulator.contributions.len()
+    );
+
+    let coord_state = state::load_coordinator_state(&storage).await;
+    info!(
+        "Loaded coordinator state: {} active nodes, {} total tokens",
+        coord_state.active_nodes, coord_state.total_tokens_trained
+    );
+
+    let app_state = Arc::new(AppState {
         storage,
         config: config.clone(),
         aggregation_in_progress: AtomicBool::new(false),
+        accumulator: RwLock::new(accumulator),
+        coord_state: RwLock::new(coord_state),
     });
+
+    // Spawn background task to persist state to R2 every 30 seconds
+    {
+        let app = Arc::clone(&app_state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                // Clone under read locks, then write to S3 outside locks
+                let acc_snapshot = app.accumulator.read().await.clone();
+                let coord_snapshot = app.coord_state.read().await.clone();
+
+                if let Err(e) = state::save_accumulator(&app.storage, &acc_snapshot).await {
+                    warn!("Background flush: failed to save accumulator: {e}");
+                }
+                if let Err(e) = app
+                    .storage
+                    .put_json(
+                        &distrain_shared::paths::coordinator_state_path(),
+                        &coord_snapshot,
+                    )
+                    .await
+                {
+                    warn!("Background flush: failed to save coordinator state: {e}");
+                }
+            }
+        });
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -69,7 +128,7 @@ async fn main() -> Result<()> {
         .layer(DefaultBodyLimit::max(512 * 1024 * 1024)) // 512 MB for delta uploads
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(app_state);
 
     let addr = format!("{}:{}", config.host, config.port);
     let listener = TcpListener::bind(&addr).await?;

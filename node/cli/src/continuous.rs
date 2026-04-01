@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -176,6 +178,8 @@ async fn delta_uploader(
     coordinator: CoordinatorClient,
     mut delta_rx: tokio::sync::mpsc::Receiver<DeltaPackage>,
     cache_dir: PathBuf,
+    measured_bandwidth_bps: Arc<AtomicU64>,
+    recommended_h_mini: Arc<AtomicU64>,
 ) {
     while let Some(pkg) = delta_rx.recv().await {
         let delta_size = pkg.compressed_bytes.len();
@@ -192,11 +196,27 @@ async fn delta_uploader(
             match storage.put(&pkg.delta_key, pkg.compressed_bytes.clone()).await {
                 Ok(()) => {
                     let secs = upload_start.elapsed().as_secs_f64();
+                    let bps = if secs > 0.0 { delta_size as f64 / secs } else { 0.0 };
                     info!(
                         "Upload: {:.1}MB in {secs:.1}s ({:.1} MB/s)",
                         delta_size as f64 / 1e6,
-                        delta_size as f64 / 1e6 / secs
+                        bps / 1e6
                     );
+
+                    // Store measured bandwidth for adaptive compression
+                    measured_bandwidth_bps.store(bps as u64, Ordering::Relaxed);
+
+                    // Recommend H_mini based on bandwidth
+                    let mb_per_sec = bps / 1e6;
+                    let new_h = if mb_per_sec > 100.0 {
+                        20
+                    } else if mb_per_sec > 10.0 {
+                        50
+                    } else {
+                        100
+                    };
+                    recommended_h_mini.store(new_h, Ordering::Relaxed);
+
                     upload_ok = true;
                     break;
                 }
@@ -292,6 +312,8 @@ pub struct ContinuousTrainingParams {
     pub initial_seq_num: u64,
     /// Pre-loaded batches for the first round.
     pub initial_batches: Vec<Vec<i64>>,
+    /// Shared bandwidth measurement from delta_uploader (bytes/sec).
+    pub measured_bandwidth_bps: Arc<AtomicU64>,
 }
 
 /// Tight training loop that runs on a blocking thread via spawn_blocking.
@@ -384,6 +406,7 @@ fn continuous_training_loop(
                 // If we trained any steps this round, extract partial delta and queue upload
                 if round_step > 0 && loss_count > 0 {
                     let mean_loss = loss_sum / loss_count as f64;
+                    let bw = params.measured_bandwidth_bps.load(Ordering::Relaxed);
                     if let Some(pkg) = build_delta_package(
                         &module,
                         &round_start_params,
@@ -395,6 +418,7 @@ fn continuous_training_loop(
                         round_step,
                         round_tokens,
                         round_start_time.elapsed().as_secs_f64(),
+                        bw,
                     ) {
                         // Best-effort send (don't block training)
                         if delta_tx.blocking_send(pkg).is_err() {
@@ -404,12 +428,10 @@ fn continuous_training_loop(
                     }
                 }
 
-                // Decay error buffer 10% on checkpoint change
-                for v in error_buffer.buffer.values_mut() {
-                    for x in v.iter_mut() {
-                        *x *= 0.9;
-                    }
-                }
+                // Keep error buffer on checkpoint change (100% retention).
+                // The accumulated error is valid gradient signal from prior
+                // training rounds — decaying it loses information permanently.
+                info!("Keeping error buffer (100% retention) across checkpoint change");
 
                 // We need new batches for the new checkpoint version (different shard
                 // assignment). Return error_buffer so the outer loop in
@@ -428,6 +450,7 @@ fn continuous_training_loop(
                 // Flush any partial round before exit
                 if round_step > 0 && loss_count > 0 {
                     let mean_loss = loss_sum / loss_count as f64;
+                    let bw = params.measured_bandwidth_bps.load(Ordering::Relaxed);
                     if let Some(pkg) = build_delta_package(
                         &module,
                         &round_start_params,
@@ -439,6 +462,7 @@ fn continuous_training_loop(
                         round_step,
                         round_tokens,
                         round_start_time.elapsed().as_secs_f64(),
+                        bw,
                     ) {
                         let _ = delta_tx.blocking_send(pkg);
                     }
@@ -466,18 +490,22 @@ fn continuous_training_loop(
                 warn!(
                     "First round had only {round_step} steps (warmup={warmup_steps}) — skipping push"
                 );
-            } else if let Some(pkg) = build_delta_package(
-                &module,
-                &round_start_params,
-                &mut error_buffer,
-                mean_loss,
-                current_version,
-                &params.node_id,
-                &mut seq_num,
-                round_step,
-                round_tokens,
-                elapsed,
-            ) {
+            } else if let Some(pkg) = {
+                let bw = params.measured_bandwidth_bps.load(Ordering::Relaxed);
+                build_delta_package(
+                    &module,
+                    &round_start_params,
+                    &mut error_buffer,
+                    mean_loss,
+                    current_version,
+                    &params.node_id,
+                    &mut seq_num,
+                    round_step,
+                    round_tokens,
+                    elapsed,
+                    bw,
+                )
+            } {
                 if delta_tx.blocking_send(pkg).is_err() {
                     warn!("Delta channel closed, training loop exiting");
                     return (error_buffer, seq_num);
@@ -505,6 +533,7 @@ fn continuous_training_loop(
                 // Flush partial round
                 if round_step > 0 && loss_count > 0 {
                     let mean_loss = loss_sum / loss_count as f64;
+                    let bw = params.measured_bandwidth_bps.load(Ordering::Relaxed);
                     if let Some(pkg) = build_delta_package(
                         &module,
                         &round_start_params,
@@ -516,6 +545,7 @@ fn continuous_training_loop(
                         round_step,
                         round_tokens,
                         round_start_time.elapsed().as_secs_f64(),
+                        bw,
                     ) {
                         let _ = delta_tx.blocking_send(pkg);
                     }
@@ -619,6 +649,10 @@ fn continuous_training_loop(
 }
 
 /// Extract delta from current model vs round start, compress, build DeltaPackage.
+///
+/// When `bandwidth_bps > 0`, uses bandwidth-adaptive compression:
+/// - First tries top_k=1.0 (keep everything, just zstd) — if it fits in a 10s upload, use it.
+/// - Otherwise falls back to loss-based adaptive top-k, but never uses INT8 quantization.
 fn build_delta_package(
     module: &DistrainTransformerModule<GpuBackend>,
     round_start_params: &HashMap<String, Vec<f32>>,
@@ -630,14 +664,57 @@ fn build_delta_package(
     steps: u64,
     tokens: u64,
     elapsed_secs: f64,
+    bandwidth_bps: u64,
 ) -> Option<DeltaPackage> {
     let current_params = module.extract_state_dict();
     let shapes = module.extract_shapes();
     let delta = compute_outer_delta(round_start_params, &current_params);
 
-    let compression_config = CompressionConfig {
-        top_k_fraction: adaptive_top_k(mean_loss, None, 0),
-        ..CompressionConfig::default()
+    let raw_param_bytes: u64 = delta.values().map(|v| v.len() as u64 * 4).sum();
+
+    let compression_config = if bandwidth_bps == 0 {
+        // No measurement yet, use default adaptive_top_k
+        CompressionConfig {
+            top_k_fraction: adaptive_top_k(mean_loss, None, 0),
+            ..CompressionConfig::default()
+        }
+    } else {
+        let upload_budget = bandwidth_bps * 10; // 10-second upload target
+
+        // Try with top_k = 1.0 (keep everything, just zstd)
+        let full_config = CompressionConfig {
+            top_k_fraction: 1.0,
+            quantize_int8: false,
+            ..CompressionConfig::default()
+        };
+
+        // Do a trial compression to check size
+        let mut trial_eb = error_buffer.clone();
+        match compress_delta(&delta, &shapes, &full_config, &mut trial_eb) {
+            Ok((compressed, _stats)) if (compressed.len() as u64) <= upload_budget => {
+                info!(
+                    "Bandwidth-adaptive: full delta fits! {}MB <= {}MB budget (bw={:.1} MB/s)",
+                    compressed.len() / (1024 * 1024),
+                    upload_budget / (1024 * 1024),
+                    bandwidth_bps as f64 / 1e6,
+                );
+                full_config
+            }
+            _ => {
+                // Need some sparsification. Use loss-based adaptive but never INT8.
+                let k = adaptive_top_k(mean_loss, Some(upload_budget), raw_param_bytes);
+                info!(
+                    "Bandwidth-adaptive: sparsifying at k={:.1}%, no INT8 (bw={:.1} MB/s)",
+                    k * 100.0,
+                    bandwidth_bps as f64 / 1e6,
+                );
+                CompressionConfig {
+                    top_k_fraction: k,
+                    quantize_int8: false,
+                    ..CompressionConfig::default()
+                }
+            }
+        }
     };
 
     match compress_delta(&delta, &shapes, &compression_config, error_buffer) {
@@ -698,7 +775,7 @@ pub async fn run_continuous_training(
     storage: Storage,
     cache_dir: PathBuf,
     node_id: String,
-    h_mini: u64,
+    mut h_mini: u64,
     batch_size: usize,
     grad_accum_steps: usize,
     manifest: &crate::data::Manifest,
@@ -710,6 +787,10 @@ pub async fn run_continuous_training(
     // Persistent state across restarts of the inner loop
     let mut error_buffer = error_buffer;
     let mut seq_num: u64 = 0;
+
+    // Shared atomics for bandwidth-adaptive compression and H_mini auto-tune
+    let measured_bandwidth_bps = Arc::new(AtomicU64::new(0));
+    let recommended_h_mini = Arc::new(AtomicU64::new(0));
 
     loop {
         // Get latest checkpoint
@@ -814,11 +895,15 @@ pub async fn run_continuous_training(
         let du_storage = storage.clone();
         let du_coordinator = coordinator.clone();
         let du_cache_dir = cache_dir.clone();
+        let du_bw = measured_bandwidth_bps.clone();
+        let du_h_mini = recommended_h_mini.clone();
         let du_handle = tokio::spawn(delta_uploader(
             du_storage,
             du_coordinator,
             delta_rx,
             du_cache_dir,
+            du_bw,
+            du_h_mini,
         ));
 
         // Build training params
@@ -840,6 +925,7 @@ pub async fn run_continuous_training(
             initial_version: version,
             initial_seq_num: seq_num,
             initial_batches: batches,
+            measured_bandwidth_bps: measured_bandwidth_bps.clone(),
         };
 
         let heartbeat_url = config.coordinator_url.clone();
@@ -863,6 +949,13 @@ pub async fn run_continuous_training(
 
         error_buffer = eb_out;
         seq_num = new_seq_num;
+
+        // H_mini auto-tune based on measured bandwidth
+        let recommended = recommended_h_mini.load(Ordering::Relaxed);
+        if recommended > 0 && recommended != h_mini {
+            info!("Bandwidth-based H_mini: {} -> {}", h_mini, recommended);
+            h_mini = recommended;
+        }
 
         // Clean up tasks
         cm_handle.abort();

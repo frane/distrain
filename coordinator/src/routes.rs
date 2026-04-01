@@ -86,22 +86,23 @@ async fn register_node(
             "Node {} hardware: {} ({:?}, {} MiB VRAM, {} cores, {} MiB RAM)",
             node_id, hw.gpu_model, hw.device_type, hw.vram_mb, hw.cpu_cores, hw.ram_mb
         );
-        let mut coord_state = state::load_coordinator_state(&app.storage).await;
-        coord_state.node_profiles.insert(node_id.clone().0, state::NodeProfile {
-            device_type: hw.device_type.clone(),
-            vram_mb: hw.vram_mb,
-            gpu_model: hw.gpu_model.clone(),
-            round_time_secs: None,
-            expected_round_time: hw.expected_round_time_secs,
-            step_time_secs: hw.step_time_secs,
-            h_mini: hw.h_mini,
-            last_push_time: None,
-        });
-        if let Some(ert) = hw.expected_round_time_secs {
-            info!("Node {} calibrated: step_time={:.2}s, H_mini={}, expected_round={:.0}s",
-                node_id, hw.step_time_secs.unwrap_or(0.0), hw.h_mini.unwrap_or(0), ert);
-        }
-        let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
+        {
+            let mut coord_state = app.coord_state.write().await;
+            coord_state.node_profiles.insert(node_id.clone().0, state::NodeProfile {
+                device_type: hw.device_type.clone(),
+                vram_mb: hw.vram_mb,
+                gpu_model: hw.gpu_model.clone(),
+                round_time_secs: None,
+                expected_round_time: hw.expected_round_time_secs,
+                step_time_secs: hw.step_time_secs,
+                h_mini: hw.h_mini,
+                last_push_time: None,
+            });
+            if let Some(ert) = hw.expected_round_time_secs {
+                info!("Node {} calibrated: step_time={:.2}s, H_mini={}, expected_round={:.0}s",
+                    node_id, hw.step_time_secs.unwrap_or(0.0), hw.h_mini.unwrap_or(0), ert);
+            }
+        } // write lock released
     }
 
     let node_endpoint = app.config.external_storage_endpoint
@@ -170,43 +171,41 @@ async fn push_delta(
         .delta_pushes_total
         .fetch_add(1, Ordering::Relaxed);
 
-    let mut acc = match state::load_accumulator(&app.storage).await {
-        Ok(a) => a,
-        Err(e) => {
-            warn!("Failed to load accumulator: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(DeltaPushResponse {
-                        accepted: false,
-                        checkpoint_version: 0,
-                        reason: Some("Internal error".to_string()),
-                    })
-                    .unwrap(),
-                ),
-            );
-        }
-    };
+    // Apply delta to in-memory accumulator
+    let (accepted, reason, staleness, weight, current_version, num_contribs);
+    {
+        let mut acc = app.accumulator.write().await;
+        let result = state::apply_delta_push(
+            &mut acc,
+            &push,
+            app.config.staleness_decay,
+            app.config.max_staleness,
+        );
+        accepted = result.0;
+        reason = result.1;
 
-    let (accepted, reason, _) = state::apply_delta_push(
-        &mut acc,
-        &push,
-        app.config.staleness_decay,
-        app.config.max_staleness,
-    );
+        if accepted {
+            staleness = acc.checkpoint_version.saturating_sub(push.checkpoint_version);
+            weight = acc.contributions.last().map(|c| c.weight).unwrap_or(0.0);
+        } else {
+            staleness = 0;
+            weight = 0.0;
+        }
+
+        num_contribs = acc.contributions.len();
+        current_version = acc.checkpoint_version;
+    } // write lock released
 
     if accepted {
         METRICS
             .delta_pushes_accepted
             .fetch_add(1, Ordering::Relaxed);
-        let staleness = acc.checkpoint_version.saturating_sub(push.checkpoint_version);
         info!(
             "Accepted delta from {} (seq={}, steps={}, staleness={})",
             push.node_id, push.seq_num, push.inner_steps, staleness,
         );
 
         // Best-effort stats append
-        let weight = acc.contributions.last().map(|c| c.weight).unwrap_or(0.0);
         let stats_storage = app.storage.clone();
         let stats_entry = crate::stats::DeltaAcceptedEntry {
             event: "delta_accepted",
@@ -239,47 +238,49 @@ async fn push_delta(
 
     METRICS
         .accumulator_contributions
-        .store(acc.contributions.len() as u64, Ordering::Relaxed);
+        .store(num_contribs as u64, Ordering::Relaxed);
 
-    let mut current_version = acc.checkpoint_version;
-
-    // Load coordinator state for capability-based checkpoint trigger
-    let mut coord_state = state::load_coordinator_state(&app.storage).await;
-
-    // Track round time: time between consecutive delta pushes from the same node.
-    // This measures the actual full round (train + compress + upload + download next checkpoint).
+    // Track round time in coordinator state (in-memory)
     if accepted {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
+        let mut coord_state = app.coord_state.write().await;
         if let Some(profile) = coord_state.node_profiles.get_mut(&push.node_id.0) {
             if let Some(last_push) = profile.last_push_time {
                 let elapsed = now_secs.saturating_sub(last_push) as f64;
                 if elapsed > 10.0 && elapsed < 600.0 {
-                    // EMA of round time (smooth out spikes from first round / autotuning)
                     profile.round_time_secs = Some(match profile.round_time_secs {
-                        Some(prev) => prev * 0.3 + elapsed * 0.7, // favor recent
+                        Some(prev) => prev * 0.3 + elapsed * 0.7,
                         None => elapsed,
                     });
                 }
             }
             profile.last_push_time = Some(now_secs);
         }
-        let _ = app.storage.put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state).await;
-    }
+    } // write lock released
 
-    // Patience-based checkpoint trigger. MIN_CONTRIBUTIONS is a manual override only.
-    let should_ckpt = state::should_checkpoint(&acc, app.config.min_contributions, app.config.min_weight, &coord_state);
+    // Checkpoint trigger check — read locks only
+    let (should_ckpt, acc_snapshot, coord_snapshot);
+    {
+        let acc = app.accumulator.read().await;
+        let coord_state = app.coord_state.read().await;
+        should_ckpt = state::should_checkpoint(&acc, app.config.min_contributions, app.config.min_weight, &coord_state);
+        // Clone for aggregation spawn (before releasing locks)
+        acc_snapshot = acc.clone();
+        coord_snapshot = coord_state.clone();
+    } // read locks released
+
     let agg_in_progress = app.aggregation_in_progress.load(Ordering::SeqCst);
     if accepted {
-        let active_count = coord_state.heartbeats.len();
-        let first_received = acc.contributions.iter().map(|c| c.received_at).min();
+        let active_count = coord_snapshot.heartbeats.len();
+        let first_received = acc_snapshot.contributions.iter().map(|c| c.received_at).min();
         let wait_secs = first_received.map(|f| (chrono::Utc::now() - f).num_seconds()).unwrap_or(0);
         info!(
             "Checkpoint check: contributions={}/{} active, waiting={}s, should_checkpoint={}, agg_in_progress={}",
-            acc.contributions.len(), active_count, wait_secs, should_ckpt, agg_in_progress,
+            acc_snapshot.contributions.len(), active_count, wait_secs, should_ckpt, agg_in_progress,
         );
     }
     if accepted && should_ckpt && !agg_in_progress
@@ -292,19 +293,18 @@ async fn push_delta(
         {
             info!(
                 "Triggering aggregation: {} contributions (active_nodes={})",
-                acc.contributions.len(), coord_state.active_nodes
+                acc_snapshot.contributions.len(), coord_snapshot.active_nodes
             );
 
             METRICS.aggregations_total.fetch_add(1, Ordering::Relaxed);
 
-            // Save accumulator before aggregation
-            if let Err(e) = state::save_accumulator(&app.storage, &acc).await {
-                warn!("Failed to save accumulator: {e}");
+            // Flush accumulator to S3 before aggregation (important state)
+            if let Err(e) = state::save_accumulator(&app.storage, &acc_snapshot).await {
+                warn!("Failed to save accumulator before aggregation: {e}");
             }
 
-            // Spawn aggregation (in background — don't block the response)
+            // Spawn aggregation with cloned data (no locks held)
             let storage = app.storage.clone();
-            let acc_clone = acc.clone();
             let outer_lr = app.config.outer_lr;
             let outer_momentum = app.config.outer_momentum;
             let keep_versions = app.config.keep_versions;
@@ -315,7 +315,7 @@ async fn push_delta(
                 let agg_start = std::time::Instant::now();
                 match crate::aggregation::run_aggregation(
                     &storage,
-                    &acc_clone,
+                    &acc_snapshot,
                     outer_lr,
                     outer_momentum,
                     keep_versions,
@@ -323,7 +323,7 @@ async fn push_delta(
                 )
                 .await
                 {
-                    Ok(new_version) => {
+                    Ok((new_version, tokens_this_checkpoint, contributor_ids)) => {
                         let agg_secs = agg_start.elapsed().as_secs_f64();
                         info!("Checkpoint v{new_version} produced in {agg_secs:.1}s");
                         METRICS
@@ -334,14 +334,47 @@ async fn push_delta(
                             .store(0, Ordering::Relaxed);
                         *METRICS.last_aggregation_secs.lock().unwrap() = agg_secs;
 
-                        // Reset accumulator
-                        let new_acc = AccumulatorState {
-                            checkpoint_version: new_version,
-                            contributions: Vec::new(), first_contribution_at: None,
-                            version: acc_clone.version + 1,
-                        };
-                        if let Err(e) = state::save_accumulator(&storage, &new_acc).await {
-                            warn!("Failed to reset accumulator: {e}");
+                        // Reset in-memory accumulator
+                        {
+                            let mut acc = agg_flag.accumulator.write().await;
+                            *acc = AccumulatorState {
+                                checkpoint_version: new_version,
+                                contributions: Vec::new(),
+                                first_contribution_at: None,
+                                version: acc.version + 1,
+                            };
+                        }
+
+                        // Update in-memory coordinator state
+                        {
+                            let mut cs = agg_flag.coord_state.write().await;
+                            cs.recent_contributors.push((new_version, contributor_ids));
+                            if cs.recent_contributors.len() > 5 {
+                                let excess = cs.recent_contributors.len() - 5;
+                                cs.recent_contributors.drain(..excess);
+                            }
+                            let recent_window = cs.recent_contributors.len().saturating_sub(3);
+                            let mut all_nodes: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                            for (_, nodes) in &cs.recent_contributors[recent_window..] {
+                                for n in nodes {
+                                    all_nodes.insert(n);
+                                }
+                            }
+                            cs.active_nodes = all_nodes.len() as u64;
+                            cs.total_tokens_trained += tokens_this_checkpoint;
+                        }
+
+                        // Immediate flush to S3 after checkpoint production
+                        let acc_snap = agg_flag.accumulator.read().await.clone();
+                        let cs_snap = agg_flag.coord_state.read().await.clone();
+                        if let Err(e) = state::save_accumulator(&storage, &acc_snap).await {
+                            warn!("Post-aggregation flush: failed to save accumulator: {e}");
+                        }
+                        if let Err(e) = storage
+                            .put_json(&distrain_shared::paths::coordinator_state_path(), &cs_snap)
+                            .await
+                        {
+                            warn!("Post-aggregation flush: failed to save coordinator state: {e}");
                         }
                     }
                     Err(e) => {
@@ -354,13 +387,6 @@ async fn push_delta(
                     .aggregation_in_progress
                     .store(false, Ordering::SeqCst);
             });
-        }
-
-        current_version = acc.checkpoint_version;
-    } else if accepted {
-        // Just save the updated accumulator
-        if let Err(e) = state::save_accumulator(&app.storage, &acc).await {
-            warn!("Failed to save accumulator: {e}");
         }
     }
 
@@ -379,15 +405,7 @@ async fn push_delta(
 
 /// GET /checkpoint/latest — current checkpoint info.
 async fn get_latest_checkpoint(State(app): State<Arc<AppState>>) -> impl IntoResponse {
-    let acc = state::load_accumulator(&app.storage)
-        .await
-        .unwrap_or(AccumulatorState {
-            checkpoint_version: 0,
-            contributions: Vec::new(), first_contribution_at: None,
-            version: 0,
-        });
-
-    let version = acc.checkpoint_version;
+    let version = app.accumulator.read().await.checkpoint_version;
     let info = CheckpointInfo {
         version,
         checkpoint_key: distrain_shared::paths::checkpoint_path(version),
@@ -427,15 +445,8 @@ async fn get_config(State(app): State<Arc<AppState>>) -> impl IntoResponse {
 
 /// GET /status — public training status.
 async fn get_status(State(app): State<Arc<AppState>>) -> impl IntoResponse {
-    let acc = state::load_accumulator(&app.storage)
-        .await
-        .unwrap_or(AccumulatorState {
-            checkpoint_version: 0,
-            contributions: Vec::new(), first_contribution_at: None,
-            version: 0,
-        });
-
-    let coord_state = state::load_coordinator_state(&app.storage).await;
+    let acc = app.accumulator.read().await;
+    let coord_state = app.coord_state.read().await;
 
     // Active nodes from heartbeat TTL (30 min)
     let now = std::time::SystemTime::now()
@@ -482,29 +493,21 @@ async fn heartbeat(
         .unwrap_or_default()
         .as_secs();
 
-    let mut coord_state = state::load_coordinator_state(&app.storage).await;
-    coord_state.heartbeats.insert(req.node_id.0.clone(), now);
+    let active = {
+        let mut coord_state = app.coord_state.write().await;
+        coord_state.heartbeats.insert(req.node_id.0.clone(), now);
 
-    // Expire nodes not seen in 10 minutes (tighter TTL since heartbeats are per-step now)
-    let ttl = 10 * 60;
-    coord_state.heartbeats.retain(|_, ts| now.saturating_sub(*ts) < ttl);
-    coord_state.active_nodes = coord_state.heartbeats.len() as u64;
-
-    let active = coord_state.active_nodes;
-    if let Err(e) = app.storage
-        .put_json(&distrain_shared::paths::coordinator_state_path(), &coord_state)
-        .await
-    {
-        warn!("Failed to save coordinator state: {e}");
-    }
+        // Expire nodes not seen in 10 minutes (tighter TTL since heartbeats are per-step now)
+        let ttl = 10 * 60;
+        coord_state.heartbeats.retain(|_, ts| now.saturating_sub(*ts) < ttl);
+        coord_state.active_nodes = coord_state.heartbeats.len() as u64;
+        coord_state.active_nodes
+    }; // write lock released
 
     METRICS.active_nodes.store(active, Ordering::Relaxed);
 
     // Check if node should abort: if checkpoint advanced beyond what it's training on
-    let acc = state::load_accumulator(&app.storage).await.unwrap_or(AccumulatorState {
-        checkpoint_version: 0, contributions: Vec::new(), first_contribution_at: None, version: 0,
-    });
-    let current_version = acc.checkpoint_version;
+    let current_version = app.accumulator.read().await.checkpoint_version;
     let should_abort = if let Some(node_version) = req.checkpoint_version {
         let staleness = current_version.saturating_sub(node_version);
         staleness >= 3 // abort if 3+ versions behind

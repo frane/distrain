@@ -3,7 +3,7 @@
 //! Downloads deltas from R2, validates, computes weighted average,
 //! applies Nesterov outer optimizer, uploads new checkpoint. All in-memory.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use distrain_model::checkpoint::{
@@ -70,7 +70,7 @@ fn compute_loss_based_outer_lr(current_lr: f64, avg_loss: f64, ln_vocab: f64) ->
 /// 3. Compute weighted average
 /// 4. Apply Nesterov outer optimizer step
 /// 5. Upload new checkpoint, velocity, and metadata to R2
-/// 6. Return new checkpoint version
+/// 6. Return (new_version, tokens_this_checkpoint, contributor_node_ids)
 pub async fn run_aggregation(
     storage: &Storage,
     acc: &AccumulatorState,
@@ -78,7 +78,7 @@ pub async fn run_aggregation(
     outer_momentum: f64,
     keep_versions: u64,
     vocab_size: u32,
-) -> Result<u64> {
+) -> Result<(u64, u64, Vec<String>)> {
     let start = std::time::Instant::now();
     let new_version = acc.checkpoint_version + 1;
 
@@ -345,31 +345,10 @@ pub async fn run_aggregation(
     )
     .await;
 
-    // Update persistent coordinator state (active nodes, total tokens)
-    let mut coord_state = crate::state::load_coordinator_state(storage).await;
+    // Compute tokens and contributor IDs for caller to update in-memory state
     let node_ids: Vec<String> = acc.contributions.iter().map(|c| c.node_id.0.clone()).collect();
-    coord_state.recent_contributors.push((new_version, node_ids));
-    if coord_state.recent_contributors.len() > 5 {
-        coord_state.recent_contributors.drain(..coord_state.recent_contributors.len() - 5);
-    }
-    // Count active nodes from last 3 checkpoints only (avoids ghost inflation from old entries)
-    let recent_window = coord_state.recent_contributors.len().saturating_sub(3);
-    let mut all_nodes: HashSet<&str> = HashSet::new();
-    for (_, nodes) in &coord_state.recent_contributors[recent_window..] {
-        for n in nodes {
-            all_nodes.insert(n);
-        }
-    }
-    coord_state.active_nodes = all_nodes.len() as u64;
     // Each contribution = inner_steps * batch_size(4) * seq_len(512)
     let tokens_this_checkpoint: u64 = acc.contributions.iter().map(|c| c.inner_steps * 4 * 512).sum();
-    coord_state.total_tokens_trained += tokens_this_checkpoint;
-    if let Err(e) = storage
-        .put_json(&paths::coordinator_state_path(), &coord_state)
-        .await
-    {
-        warn!("Failed to save coordinator state: {e}");
-    }
 
     info!("Aggregation complete: checkpoint v{new_version} in {elapsed:.1}s, delta_norm={delta_norm:.4}");
 
@@ -387,7 +366,7 @@ pub async fn run_aggregation(
         });
     }
 
-    Ok(new_version)
+    Ok((new_version, tokens_this_checkpoint, node_ids))
 }
 
 /// Delete old checkpoints, deltas, and optimizer state up to (but not including) `up_to_version`.
