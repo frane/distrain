@@ -267,7 +267,7 @@ async fn push_delta(
     {
         let acc = app.accumulator.read().await;
         let coord_state = app.coord_state.read().await;
-        should_ckpt = state::should_checkpoint(&acc, app.config.min_contributions, app.config.min_weight, &coord_state);
+        should_ckpt = state::should_checkpoint(&acc, app.config.min_contributions, &coord_state);
         // Clone for aggregation spawn (before releasing locks)
         acc_snapshot = acc.clone();
         coord_snapshot = coord_state.clone();

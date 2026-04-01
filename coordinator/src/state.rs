@@ -140,24 +140,30 @@ pub fn apply_delta_push(
 pub fn should_checkpoint(
     acc: &AccumulatorState,
     min_contributions_override: u64,
-    _min_weight: f64,
     coord_state: &CoordinatorPersistentState,
 ) -> bool {
     let num_contribs = acc.contributions.len();
 
-    // Need at least 1 contribution
-    if num_contribs == 0 {
+    if acc.contributions.is_empty() {
         return false;
-    }
-
-    // MIN_CONTRIBUTIONS override: if set (> 0) and met, trigger immediately.
-    // This is a manual override, not the default behavior.
-    if min_contributions_override > 0 && num_contribs as u64 >= min_contributions_override {
-        return true;
     }
 
     // Count active nodes (those with recent heartbeats)
     let active_count = coord_state.heartbeats.len();
+
+    // Minimum contributions: auto-computed from active nodes unless overridden.
+    // Default: at least half the active nodes (min 2 when >1 node).
+    let min_required = if min_contributions_override > 0 {
+        min_contributions_override as usize
+    } else if active_count <= 1 {
+        1
+    } else {
+        (active_count / 2).max(2)
+    };
+
+    if num_contribs < min_required {
+        return false;
+    }
 
     // Check how many active nodes have contributed
     let contributing_ids: std::collections::HashSet<&str> = acc.contributions.iter()

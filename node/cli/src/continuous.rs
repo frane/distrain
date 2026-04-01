@@ -1002,11 +1002,15 @@ pub async fn run_continuous_training(
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
-        // H_mini auto-tune based on measured bandwidth
+        // H_mini auto-tune based on measured bandwidth, clamped to config bounds
         let recommended = recommended_h_mini.load(Ordering::Relaxed);
-        if recommended > 0 && recommended != h_mini {
-            info!("Bandwidth-based H_mini: {} -> {}", h_mini, recommended);
-            h_mini = recommended;
+        if recommended > 0 {
+            let clamped = recommended.clamp(config.min_inner_steps, config.max_inner_steps);
+            if clamped != h_mini {
+                info!("Bandwidth-based H_mini: {h_mini} -> {clamped} (raw={recommended}, bounds=[{},{}])",
+                    config.min_inner_steps, config.max_inner_steps);
+                h_mini = clamped;
+            }
         }
 
         // Clean up tasks
