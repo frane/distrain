@@ -165,12 +165,11 @@ pub fn min_vram_mb(model_weight_bytes: u64) -> u64 {
 ///
 /// Returns a batch size based on available VRAM (no artificial cap).
 pub fn estimate_batch_size_from_vram(vram_mb: u64, model_weight_bytes: u64, _seq_len: usize) -> usize {
-    // Very conservative for burn + CUDA + cubecl autotuning:
-    // - Model weights + optimizer + gradients + cubecl buffers ≈ 15x weight bytes
-    // - Activation memory per batch item ≈ 4x weight bytes (autodiff retains all intermediates)
-    // Probe will find the real max; this just picks the starting point.
-    let model_overhead = model_weight_bytes * 15;
-    let activation_per_item = model_weight_bytes * 4;
+    // Model overhead: weights(1x BF16) + gradients(1x) + optimizer(4x FP32) = 6x weight bytes
+    // Plus ~2GB fixed overhead for cubecl autotuning, kernel caches, CUDA context.
+    let model_overhead = model_weight_bytes * 6 + 2 * 1024 * 1024 * 1024;
+    // Activation memory per batch item ≈ 2x weight bytes (autodiff retains intermediates)
+    let activation_per_item = model_weight_bytes * 2;
     let available = (vram_mb * 1024 * 1024).saturating_sub(model_overhead);
     let max_batch = (available / activation_per_item.max(1)).max(1) as usize;
     max_batch
@@ -753,7 +752,7 @@ pub async fn calibrate_batch_size(
 
     // Binary search for max batch size that fits in VRAM.
     // Finds the exact maximum (e.g., 5, 6, 7) without probing every value.
-    let max_probe = target_batch.min(16);
+    let max_probe = target_batch;
     let mut lo = 1usize;
     let mut hi = max_probe;
     let mut best_bs = 1usize;
