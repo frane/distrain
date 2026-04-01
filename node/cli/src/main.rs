@@ -568,9 +568,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     let estimated_bs = trainer::estimate_batch_size_from_vram(
                         vram, model_weight_bytes, config.seq_len,
                     );
-                    // Clamp to effective_batch_size
-                    let bs = estimated_bs.min(effective_batch_size).max(1);
-                    let accum = effective_batch_size / bs;
+                    // Use VRAM estimate directly — don't cap at config.batch_size
+                    let bs = estimated_bs.max(1);
+                    let accum = 1usize; // no grad accumulation needed if VRAM allows full batch
                     info!(
                         "VRAM-based batch estimate: {vram} MiB VRAM → batch_size={bs}, grad_accum={}",
                         accum.max(1),
