@@ -164,14 +164,16 @@ pub fn min_vram_mb(model_weight_bytes: u64) -> u64 {
 /// activation memory for each batch item.
 ///
 /// Returns a batch size based on available VRAM (no artificial cap).
-pub fn estimate_batch_size_from_vram(vram_mb: u64, model_weight_bytes: u64, seq_len: usize) -> usize {
-    // Model needs: weights (BF16) + optimizer (FP32 x2) + gradients (BF16) ≈ 5x weight bytes
-    let model_overhead = model_weight_bytes * 5;
-    // Rough activation memory per batch item
-    let activation_per_item = (seq_len * 4 * 1024) as u64; // rough estimate
+pub fn estimate_batch_size_from_vram(vram_mb: u64, model_weight_bytes: u64, _seq_len: usize) -> usize {
+    // Conservative estimate for burn + CUDA:
+    // - Model weights + optimizer + gradients + cubecl overhead ≈ 10x weight bytes
+    // - Activation memory per batch item ≈ 2x weight bytes (transformers with autodiff)
+    // This is intentionally conservative — the GPU subprocess probe will find the real max.
+    let model_overhead = model_weight_bytes * 10;
+    let activation_per_item = model_weight_bytes * 2;
     let available = (vram_mb * 1024 * 1024).saturating_sub(model_overhead);
     let max_batch = (available / activation_per_item.max(1)).max(1) as usize;
-    max_batch // no artificial cap — VRAM is the limit
+    max_batch
 }
 
 /// Probe for a GPU adapter. Tries CUDA first (if compiled in), then wgpu, then gives up.
@@ -749,10 +751,18 @@ pub async fn calibrate_batch_size(
         Err(_) => return (target_batch, 1, None),
     };
 
-    for &bs in &[8, 4, 2, 1] {
-        if bs > target_batch {
-            continue;
-        }
+    // Build probe sequence: start from target_batch, halve down to 1
+    let mut probe_sizes = Vec::new();
+    let mut bs_probe = target_batch.min(16); // start from estimate or 16, whichever is smaller
+    while bs_probe >= 1 {
+        probe_sizes.push(bs_probe);
+        bs_probe /= 2;
+    }
+    if probe_sizes.is_empty() || *probe_sizes.last().unwrap() != 1 {
+        probe_sizes.push(1);
+    }
+
+    for &bs in &probe_sizes {
         info!("Probing GPU batch_size={bs}...");
         let child = tokio::process::Command::new(&exe)
             .arg("gpu-stress-test")
