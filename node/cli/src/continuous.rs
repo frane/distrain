@@ -845,8 +845,17 @@ pub async fn run_continuous_training(
             .filter_map(|&idx| manifest.shards.get(idx).map(|e| e.filename.clone()))
             .collect();
 
-        // Create streaming data loader
-        let max_loaded_shards = 5;
+        // Compute max loaded shards from available memory (each shard ~20MB)
+        let max_loaded_shards = {
+            let budget = crate::resources::compute_memory_budget(
+                &model_config, config,
+            );
+            match budget {
+                Ok(b) => b.max_shards.max(2).min(shard_ids.len()),
+                Err(_) => 5, // fallback if memory detection fails
+            }
+        };
+        info!("Streaming data loader: max_loaded_shards={max_loaded_shards} (memory-based)");
         let mut streaming_loader = crate::data::StreamingDataLoader::new(
             storage.clone(),
             shard_names,

@@ -41,26 +41,19 @@ struct OuterLrState {
 
 fn default_momentum() -> f64 { 0.9 }
 
-/// Compute outer_lr from absolute loss, relative to ln(vocab_size).
+/// Outer LR is fixed at 1.0.
 ///
-/// The loss value directly encodes the training phase — no need to estimate
-/// derivatives. Thresholds are expressed as multiples of ln(vocab_size) so
-/// the schedule adapts to any model/tokenizer.
+/// The merged delta IS the correct update — it's a weighted average of
+/// multiple nodes' training results. Scaling it below 1.0 throws away signal.
+/// With momentum=0, this means: new_θ = θ_trained (perfect application).
 ///
-/// Returns (new_lr, target_lr, loss_ratio).
-fn compute_loss_based_outer_lr(current_lr: f64, avg_loss: f64, ln_vocab: f64) -> (f64, f64, f64) {
+/// Previously this was adaptive (0.70-1.0), but every point below 1.0
+/// directly reduces gradient signal and widens the gap to single-GPU baseline.
+///
+/// Returns (1.0, 1.0, loss_ratio) for logging compatibility.
+fn compute_loss_based_outer_lr(_current_lr: f64, avg_loss: f64, ln_vocab: f64) -> (f64, f64, f64) {
     let ratio = avg_loss / ln_vocab;
-
-    // Start at 1.0 and let the self-optimizer come down if needed.
-    // The merged delta is already weighted and compressed — applying it at less than
-    // 1.0 throws away signal. Only reduce for truly chaotic early training (ratio > 10).
-    let ln_ratio = if ratio > 0.01 { ratio.ln() } else { (-4.6f64) }; // floor at ln(0.01)
-    let target_lr = (0.02 * ln_ratio + 0.96).clamp(0.80, 1.0);
-
-    // EMA smooth (lighter smoothing to respond faster)
-    let new_lr = (current_lr * 0.5 + target_lr * 0.5).clamp(0.70, 1.0);
-
-    (new_lr, target_lr, ratio)
+    (1.0, 1.0, ratio)
 }
 
 /// Run the full aggregation pipeline in pure Rust.
@@ -156,11 +149,23 @@ pub async fn run_aggregation(
         Err(_) => info!("No optimizer velocity state found (first aggregation)"),
     }
 
-    // 3. Download, decompress, validate all deltas
+    // 3. Download all deltas in parallel, then decompress and validate
     let total_weight: f64 = acc.contributions.iter().map(|c| c.weight).sum();
     if total_weight == 0.0 {
         anyhow::bail!("Total weight is zero");
     }
+
+    // Download all deltas concurrently
+    let download_futures: Vec<_> = acc
+        .contributions
+        .iter()
+        .map(|contrib| {
+            let storage = storage.clone();
+            let key = contrib.delta_key.clone();
+            async move { (storage.get(&key).await, key) }
+        })
+        .collect();
+    let downloaded: Vec<_> = futures::future::join_all(download_futures).await;
 
     let mut delta_weight_pairs: Vec<(HashMap<String, Vec<f32>>, f64)> = Vec::new();
     let mut accepted = 0usize;
@@ -170,19 +175,18 @@ pub async fn run_aggregation(
     let mut loss_sum: f64 = 0.0;
     let mut tokens_sum: u64 = 0;
 
-    for contrib in &acc.contributions {
-        // Download delta bytes
-        let delta_bytes = match storage.get(&contrib.delta_key).await {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("Failed to download delta {}: {e}", contrib.delta_key);
+    for (i, contrib) in acc.contributions.iter().enumerate() {
+        let delta_bytes = match &downloaded[i] {
+            (Ok(b), _) => b,
+            (Err(e), key) => {
+                warn!("Failed to download delta {key}: {e}");
                 rejected += 1;
                 continue;
             }
         };
 
         // Decompress: try zstd first, fallback to raw JSON
-        let mut delta = match decompress_delta_bytes(&delta_bytes) {
+        let mut delta = match decompress_delta_bytes(delta_bytes) {
             Ok(d) => d,
             Err(e) => {
                 warn!(

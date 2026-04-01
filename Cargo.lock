@@ -3030,6 +3030,7 @@ dependencies = [
  "chrono",
  "distrain-model",
  "distrain-shared",
+ "futures",
  "once_cell",
  "serde",
  "serde_json",
