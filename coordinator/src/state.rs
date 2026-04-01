@@ -92,11 +92,10 @@ pub fn apply_delta_push(
         // Remove old contribution from this node (will be replaced)
     }
 
-    // Compute weight from tokens processed (not inner_steps, which ignores batch_size).
-    // Normalize by reference: 50 steps × batch=4 × seq=512 = 102400 tokens.
+    // Weight = tokens processed × staleness decay.
+    // More tokens = more signal. Stale deltas get exponentially less weight.
     let staleness_weight = staleness_decay.powi(staleness as i32);
-    let token_weight = push.tokens_processed as f64 / 102400.0;
-    let weight = token_weight * staleness_weight;
+    let weight = push.tokens_processed as f64 * staleness_weight;
 
     // Remove old contribution from this node if present
     acc.contributions.retain(|c| c.node_id != push.node_id);
