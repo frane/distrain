@@ -751,60 +751,59 @@ pub async fn calibrate_batch_size(
         Err(_) => return (target_batch, 1, None),
     };
 
-    // Probe every batch size from estimate down to 1.
-    // First one that doesn't OOM wins — finds the true maximum.
-    let start = target_batch.min(16);
-    let probe_sizes: Vec<usize> = (1..=start).rev().collect();
+    // Binary search for max batch size that fits in VRAM.
+    // Finds the exact maximum (e.g., 5, 6, 7) without probing every value.
+    let max_probe = target_batch.min(16);
+    let mut lo = 1usize;
+    let mut hi = max_probe;
+    let mut best_bs = 1usize;
+    let mut best_sps: Option<f64> = None;
 
-    for &bs in &probe_sizes {
-        info!("Probing GPU batch_size={bs}...");
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        info!("Probing GPU batch_size={mid} (binary search [{lo}..{hi}])...");
         let child = tokio::process::Command::new(&exe)
             .arg("gpu-stress-test")
             .arg(checkpoint_path.to_str().unwrap())
-            .arg("--batch-size").arg(bs.to_string())
+            .arg("--batch-size").arg(mid.to_string())
             .arg("--seq-len").arg(seq_len.to_string())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn();
-
-        let Ok(child) = child else {
-            warn!("Failed to spawn gpu-stress-test for batch_size={bs}");
-            continue;
-        };
-
-        // 180s timeout: first-ever Metal shader compilation for 1B model takes 30-60s,
-        // plus autotuning and the actual forward+backward pass
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(180),
-            child.wait_with_output(),
-        ).await {
-            Ok(Ok(output)) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(line) = stdout.lines().find(|l| l.starts_with("GPU_STRESS_OK")) {
-                    if let Some(sps) = line.split_whitespace().nth(1).and_then(|s| s.parse::<f64>().ok()) {
-                        let grad_accum = target_batch / bs;
-                        info!("GPU batch_size={bs} OK ({sps:.3}s/step), grad_accum={}", grad_accum.max(1));
-                        return (bs, grad_accum.max(1), Some(sps));
+        match child {
+            Ok(child) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(180),
+                    child.wait_with_output(),
+                ).await {
+                    Ok(Ok(output)) if output.status.success() => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let sps = stdout.lines()
+                            .find(|l| l.starts_with("GPU_STRESS_OK"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse::<f64>().ok());
+                        info!("GPU batch_size={mid} OK (sps={sps:?})");
+                        best_bs = mid;
+                        best_sps = sps;
+                        lo = mid + 1; // try bigger
+                    }
+                    _ => {
+                        info!("GPU batch_size={mid} failed (OOM or timeout)");
+                        hi = mid - 1; // try smaller
                     }
                 }
             }
-            Ok(Ok(output)) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let code = output.status.code().unwrap_or(-1);
-                warn!("GPU batch_size={bs} failed (exit {code}): {}", stderr.lines().last().unwrap_or("unknown"));
-            }
-            Ok(Err(e)) => {
-                warn!("GPU batch_size={bs} subprocess error: {e}");
-            }
             Err(_) => {
-                warn!("GPU batch_size={bs} timed out (120s)");
+                hi = mid - 1;
             }
         }
     }
 
-    // All GPU sizes failed — caller should fall back to CPU
-    warn!("All GPU batch sizes failed — recommend CPU fallback");
-    (0, 1, None) // batch_size=0 signals failure
+    let grad_accum = 1usize;
+    info!(
+        "GPU calibration: batch_size={best_bs}, secs_per_step={best_sps:?}",
+    );
+    (best_bs, grad_accum, best_sps)
 }
 
 /// Infer model config from checkpoint tensor shapes.
