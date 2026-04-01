@@ -165,12 +165,12 @@ pub fn min_vram_mb(model_weight_bytes: u64) -> u64 {
 ///
 /// Returns a batch size based on available VRAM (no artificial cap).
 pub fn estimate_batch_size_from_vram(vram_mb: u64, model_weight_bytes: u64, _seq_len: usize) -> usize {
-    // Conservative estimate for burn + CUDA:
-    // - Model weights + optimizer + gradients + cubecl overhead ≈ 10x weight bytes
-    // - Activation memory per batch item ≈ 2x weight bytes (transformers with autodiff)
-    // This is intentionally conservative — the GPU subprocess probe will find the real max.
-    let model_overhead = model_weight_bytes * 10;
-    let activation_per_item = model_weight_bytes * 2;
+    // Very conservative for burn + CUDA + cubecl autotuning:
+    // - Model weights + optimizer + gradients + cubecl buffers ≈ 15x weight bytes
+    // - Activation memory per batch item ≈ 4x weight bytes (autodiff retains all intermediates)
+    // Probe will find the real max; this just picks the starting point.
+    let model_overhead = model_weight_bytes * 15;
+    let activation_per_item = model_weight_bytes * 4;
     let available = (vram_mb * 1024 * 1024).saturating_sub(model_overhead);
     let max_batch = (available / activation_per_item.max(1)).max(1) as usize;
     max_batch
@@ -928,7 +928,7 @@ pub async fn stress_test_gpu(
                     .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
                     .init::<GpuBackend, DistrainTransformerModule<GpuBackend>>();
 
-                let stress_steps = 1u64;
+                let stress_steps = 3u64; // 3 steps to catch memory growth from autodiff/caching
                 let start = Instant::now();
 
                 for step in 0..stress_steps {
