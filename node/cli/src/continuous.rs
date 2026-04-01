@@ -562,17 +562,13 @@ fn continuous_training_loop(
         };
 
         // ── 4. Train one step ───────────────────────────────────────
-        let warmup = if first_round { warmup_steps as usize } else { 0 };
-        let lr = if first_round {
-            cosine_lr(
-                round_step as usize,
-                warmup,
-                h_mini as usize,
-                lr_max,
-                lr_min,
-            )
+        // Use constant lr_max after warmup. No cosine restart per round —
+        // the outer optimizer (checkpoint merge) handles the learning schedule.
+        // Warmup only on the very first round of the very first checkpoint.
+        let lr = if first_round && round_step < warmup_steps {
+            // Linear warmup
+            lr_max * (round_step as f64 / warmup_steps as f64)
         } else {
-            // After first round: constant lr_max (model is warm)
             lr_max
         };
 
