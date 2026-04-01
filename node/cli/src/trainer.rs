@@ -751,16 +751,10 @@ pub async fn calibrate_batch_size(
         Err(_) => return (target_batch, 1, None),
     };
 
-    // Build probe sequence: start from target_batch, halve down to 1
-    let mut probe_sizes = Vec::new();
-    let mut bs_probe = target_batch.min(16); // start from estimate or 16, whichever is smaller
-    while bs_probe >= 1 {
-        probe_sizes.push(bs_probe);
-        bs_probe /= 2;
-    }
-    if probe_sizes.is_empty() || *probe_sizes.last().unwrap() != 1 {
-        probe_sizes.push(1);
-    }
+    // Probe every batch size from estimate down to 1.
+    // First one that doesn't OOM wins — finds the true maximum.
+    let start = target_batch.min(16);
+    let probe_sizes: Vec<usize> = (1..=start).rev().collect();
 
     for &bs in &probe_sizes {
         info!("Probing GPU batch_size={bs}...");
