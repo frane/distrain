@@ -149,30 +149,18 @@ pub enum GpuVerdict {
     NoAdapter,
 }
 
-/// Minimum VRAM (in MiB) required for GPU training, given model weight bytes.
-/// Needs ~5x weight bytes (weights + optimizer + gradients) plus headroom for activations.
-pub fn min_vram_mb(model_weight_bytes: u64) -> u64 {
-    let model_overhead_mb = model_weight_bytes * 5 / (1024 * 1024);
-    // Need model overhead + at least 512MB for activations of batch_size=1
-    (model_overhead_mb + 512).max(1024)
-}
-
-/// Estimate maximum batch size from known VRAM.
-///
-/// Uses a conservative model: weights (BF16) + optimizer (FP32 x2) + gradients (BF16)
-/// require roughly 5x the raw weight bytes. The remaining VRAM is split among
-/// activation memory for each batch item.
-///
-/// Returns a batch size based on available VRAM (no artificial cap).
+/// Estimate maximum batch size from VRAM. This is just a starting point for
+/// Estimate starting batch size for the binary search probe.
+/// Intentionally optimistic — the probe will find the real max by trying and failing.
+/// Always returns >= 1 so the probe runs.
 pub fn estimate_batch_size_from_vram(vram_mb: u64, model_weight_bytes: u64, _seq_len: usize) -> usize {
-    // Model overhead: weights(1x BF16) + gradients(1x) + optimizer(4x FP32) = 6x weight bytes
-    // Plus ~2GB fixed overhead for cubecl autotuning, kernel caches, CUDA context.
-    let model_overhead = model_weight_bytes * 6 + 2 * 1024 * 1024 * 1024;
-    // Activation memory per batch item ≈ 2x weight bytes (autodiff retains intermediates)
-    let activation_per_item = model_weight_bytes * 2;
-    let available = (vram_mb * 1024 * 1024).saturating_sub(model_overhead);
-    let max_batch = (available / activation_per_item.max(1)).max(1) as usize;
-    max_batch
+    let overhead = model_weight_bytes * 6 + 2 * 1024 * 1024 * 1024; // 6x weights + 2GB fixed
+    let per_item = (model_weight_bytes * 2).max(1); // ~2x weights per batch item
+    let vram_bytes = vram_mb as u64 * 1024 * 1024;
+    if vram_bytes <= overhead {
+        return 1; // might still work — let probe decide
+    }
+    ((vram_bytes - overhead) / per_item).max(1) as usize
 }
 
 /// Probe for a GPU adapter. Tries CUDA first (if compiled in), then wgpu, then gives up.

@@ -510,36 +510,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     trainer::GpuVerdict::Available { name, is_integrated, max_buffer_size, vram_mb, .. } => {
                         gpu_vram_mb = vram_mb;
 
-                        // VRAM threshold check for CUDA GPUs with known VRAM
-                        if let Some(vram) = vram_mb {
-                            if vram < trainer::min_vram_mb(model_weight_bytes) {
-                                warn!(
-                                    "GPU '{name}' has {vram} MiB VRAM (minimum {} MiB) — using CPU",
-                                    trainer::min_vram_mb(model_weight_bytes),
-                                );
-                            }
-                        }
-
-                        // Integrated GPU check: need buffer large enough to hold model weights.
-                        // Apple Silicon (19GB+) passes easily. Intel Iris (2GB) fails.
-                        // Use 4× model weight size as threshold — accounts for model + optimizer
-                        // + activations in unified memory.
-                        if is_integrated {
-                            if max_buffer_size >= model_weight_bytes * 4 {
-                                info!(
-                                    "GPU '{name}' is integrated with large buffer ({}MB vs {}MB model weights) — will benchmark",
-                                    max_buffer_size / (1024 * 1024), model_weight_bytes / (1024 * 1024),
-                                );
-                            } else {
-                                info!(
-                                    "GPU '{name}' is integrated with small buffer ({}MB vs {}MB model weights) — using CPU",
-                                    max_buffer_size / (1024 * 1024), model_weight_bytes / (1024 * 1024),
-                                );
-                            }
-                        }
-                        if vram_mb.map_or(false, |v| v < trainer::min_vram_mb(model_weight_bytes)) {
-                            // VRAM below minimum threshold — skip GPU
-                        } else if is_integrated && max_buffer_size < model_weight_bytes * 4 {
+                        // Integrated GPU with tiny buffer: skip (e.g., Intel Iris 2GB)
+                        // Discrete GPUs and large integrated GPUs: always try, let probe decide.
+                        if is_integrated && max_buffer_size < model_weight_bytes * 4 {
                             // skip
                         } else if max_buffer_size < model_weight_bytes {
                             info!(
