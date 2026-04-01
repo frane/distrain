@@ -508,7 +508,12 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                 let verdict = trainer::probe_gpu().await;
                 match verdict {
                     trainer::GpuVerdict::Available { name, is_integrated, max_buffer_size, vram_mb, .. } => {
-                        gpu_vram_mb = vram_mb;
+                        // Use VRAM if known, else estimate from max_buffer_size (integrated GPUs)
+                        gpu_vram_mb = vram_mb.or_else(|| {
+                            // max_buffer_size is in bytes, convert to MiB
+                            // For integrated GPUs, buffer size ≈ usable GPU memory
+                            Some(max_buffer_size / (1024 * 1024))
+                        });
 
                         // Integrated GPU with tiny buffer: skip (e.g., Intel Iris 2GB)
                         // Discrete GPUs and large integrated GPUs: always try, let probe decide.
