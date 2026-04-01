@@ -17,7 +17,6 @@ S3_ACCESS_KEY="${S3_ACCESS_KEY:-minioadmin}"
 S3_SECRET_KEY="${S3_SECRET_KEY:-minioadmin}"
 S3_REGION="${S3_REGION:-us-east-1}"
 GPU_DEVICE="${GPU_DEVICE:-0}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
 MIN_INNER_STEPS="${MIN_INNER_STEPS:-50}"
 MAX_INNER_STEPS="${MAX_INNER_STEPS:-500}"
 PUSH_INTERVAL="${PUSH_INTERVAL:-60.0}"
@@ -31,8 +30,15 @@ min_inner_steps = ${MIN_INNER_STEPS}
 max_inner_steps = ${MAX_INNER_STEPS}
 cache_dir = "/workspace/cache"
 max_cache_gb = 20
-batch_size = ${BATCH_SIZE}
 seq_len = 512
+EOF
+
+# Only set force_batch_size if explicitly provided — otherwise let node auto-detect from VRAM
+if [ -n "$BATCH_SIZE" ]; then
+  echo "force_batch_size = ${BATCH_SIZE}" >> /workspace/node.toml
+fi
+
+cat >> /workspace/node.toml << EOF
 
 [storage]
 endpoint = "${S3_ENDPOINT}"

@@ -11,6 +11,7 @@
 //! - `StreamingDataLoader`: downloads shards on demand, keeps only a few in memory.
 //!   Training starts after the first 2 shards are ready instead of waiting for all 220.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -447,6 +448,64 @@ impl StreamingDataLoader {
     /// Total number of assigned shards (loaded + not yet downloaded).
     pub fn total_shards(&self) -> usize {
         self.shard_names.len()
+    }
+
+    /// Extract loaded shard data as a map from shard filename to tokens.
+    /// Used to pass pre-loaded data to a new loader on checkpoint change.
+    pub fn take_loaded_shards(&mut self) -> HashMap<String, Vec<u16>> {
+        let mut map = HashMap::new();
+        for (idx, tokens) in self.loaded.drain(..) {
+            if let Some(name) = self.shard_names.get(idx) {
+                map.insert(name.clone(), tokens);
+            }
+        }
+        map
+    }
+
+    /// Create a new loader reusing pre-loaded shard data where assignments overlap.
+    /// Only downloads shards that aren't already in memory.
+    pub async fn new_with_cache(
+        storage: Storage,
+        shard_names: Vec<String>,
+        cache_dir: PathBuf,
+        seq_len: usize,
+        max_loaded: usize,
+        mut preloaded: HashMap<String, Vec<u16>>,
+    ) -> Result<Self> {
+        let max_loaded = max_loaded.max(2);
+        let initial_count = max_loaded.min(shard_names.len());
+        let mut loaded = Vec::with_capacity(max_loaded);
+        let mut reused = 0usize;
+
+        for i in 0..initial_count {
+            let name = &shard_names[i];
+            if let Some(tokens) = preloaded.remove(name) {
+                loaded.push((i, tokens));
+                reused += 1;
+            } else {
+                let tokens = download_shard_cached(&storage, name, &cache_dir).await
+                    .with_context(|| format!("Failed to download shard {name}"))?;
+                loaded.push((i, tokens));
+            }
+        }
+
+        let total_loaded_tokens: u64 = loaded.iter().map(|(_, t)| t.len() as u64).sum();
+        info!(
+            "StreamingDataLoader ready: {} tokens across {}/{} shards ({} reused from previous checkpoint)",
+            total_loaded_tokens, initial_count, shard_names.len(), reused,
+        );
+
+        Ok(Self {
+            storage,
+            shard_names,
+            cache_dir,
+            seq_len,
+            loaded,
+            current_idx: 0,
+            offset: 0,
+            next_to_download: initial_count,
+            max_loaded,
+        })
     }
 
     /// Seek to a deterministic position based on a seed (e.g., seq_num).

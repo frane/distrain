@@ -787,6 +787,7 @@ pub async fn run_continuous_training(
     // Persistent state across restarts of the inner loop
     let mut error_buffer = error_buffer;
     let mut seq_num: u64 = 0;
+    let mut cached_shards: std::collections::HashMap<String, Vec<u16>> = std::collections::HashMap::new();
 
     // Shared atomics for bandwidth-adaptive compression and H_mini auto-tune
     let measured_bandwidth_bps = Arc::new(AtomicU64::new(0));
@@ -856,14 +857,27 @@ pub async fn run_continuous_training(
             }
         };
         info!("Streaming data loader: max_loaded_shards={max_loaded_shards} (memory-based)");
-        let mut streaming_loader = crate::data::StreamingDataLoader::new(
-            storage.clone(),
-            shard_names,
-            data_cache.clone(),
-            seq_len,
-            max_loaded_shards,
-        )
-        .await?;
+        let mut streaming_loader = if cached_shards.is_empty() {
+            crate::data::StreamingDataLoader::new(
+                storage.clone(),
+                shard_names,
+                data_cache.clone(),
+                seq_len,
+                max_loaded_shards,
+            )
+            .await?
+        } else {
+            let prev = std::mem::take(&mut cached_shards);
+            crate::data::StreamingDataLoader::new_with_cache(
+                storage.clone(),
+                shard_names,
+                data_cache.clone(),
+                seq_len,
+                max_loaded_shards,
+                prev,
+            )
+            .await?
+        };
 
         streaming_loader.seek_by_seed(seq_num);
 
@@ -879,6 +893,9 @@ pub async fn run_continuous_training(
             "Pre-generated {} micro-batches for ~{rounds_worth} rounds",
             batches.len()
         );
+
+        // Save shard data for reuse on next checkpoint change
+        cached_shards = streaming_loader.take_loaded_shards();
 
         // Set up channels
         // std::sync::mpsc: checkpoint_manager (async) -> training thread (blocking)
