@@ -107,6 +107,7 @@ pub fn apply_delta_push(
         weight,
         checkpoint_version: push.checkpoint_version,
         inner_steps: push.inner_steps,
+        tokens_processed: push.tokens_processed,
         delta_key: push.delta_key.clone(),
         received_at: Utc::now(),
         training_loss: push.training_loss,

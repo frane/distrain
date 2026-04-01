@@ -331,7 +331,7 @@ pub async fn run_aggregation(
         per_delta_norms.push(effective_dnorm);
         *staleness_counts.entry(staleness).or_insert(0) += 1usize;
         loss_sum += contrib.training_loss;
-        tokens_sum += contrib.inner_steps * 4 * 512; // batch_size * seq_len approximation
+        tokens_sum += contrib.tokens_processed;
 
         delta_weight_pairs.push((delta, contrib.weight));
         accepted += 1;
@@ -451,7 +451,7 @@ pub async fn run_aggregation(
     // Compute tokens and contributor IDs for caller to update in-memory state
     let node_ids: Vec<String> = acc.contributions.iter().map(|c| c.node_id.0.clone()).collect();
     // Each contribution = inner_steps * batch_size(4) * seq_len(512)
-    let tokens_this_checkpoint: u64 = acc.contributions.iter().map(|c| c.inner_steps * 4 * 512).sum();
+    let tokens_this_checkpoint: u64 = acc.contributions.iter().map(|c| c.tokens_processed).sum();
 
     info!("Aggregation complete: checkpoint v{new_version} in {elapsed:.1}s, delta_norm={delta_norm:.4}");
 

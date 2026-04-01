@@ -98,6 +98,8 @@ pub struct ContributionMeta {
     pub weight: f64,
     pub checkpoint_version: u64,
     pub inner_steps: u64,
+    #[serde(default)]
+    pub tokens_processed: u64,
     pub delta_key: String,
     pub received_at: DateTime<Utc>,
     #[serde(default)]
