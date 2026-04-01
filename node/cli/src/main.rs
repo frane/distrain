@@ -543,31 +543,19 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                 h_mini = min_h; // will be refined from first round timing
                 info!("Forced batch_size={forced_bs} (skipping calibration), grad_accum={grad_accum_steps}");
             } else if use_gpu {
-                // Use VRAM estimate as starting batch size. No subprocess probing —
-                // real training will catch OOM and reduce batch_size automatically.
-                // secs_per_step is measured from the first actual training round.
-                if let Some(vram) = gpu_vram_mb {
-                    let estimated_bs = trainer::estimate_batch_size_from_vram(
-                        vram, model_weight_bytes, config.seq_len,
-                    );
-                    batch_size = estimated_bs.max(1);
-                    effective_batch_size = batch_size;
-                    grad_accum_steps = 1;
-                    batch_calibrated = true;
-                    // H_mini from first round timing (use min_h as starting point)
-                    h_mini = min_h;
-                    info!(
-                        "VRAM-based batch_size={batch_size} ({vram} MiB). Will auto-reduce on OOM.",
-                    );
+                // Batch size determined during real training startup in continuous.rs:
+                // after model+optimizer load, query actual free VRAM, compute batch from that.
+                // Just use VRAM estimate as initial value — continuous training will adjust.
+                batch_size = if let Some(vram) = gpu_vram_mb {
+                    trainer::estimate_batch_size_from_model(vram, &model_config, config.seq_len)
                 } else {
-                    // No VRAM info — try batch_size=4 as starting point, OOM handler will adjust
-                    batch_size = 4;
-                    effective_batch_size = batch_size;
-                    grad_accum_steps = 1;
-                    batch_calibrated = true;
-                    h_mini = min_h;
-                    info!("No VRAM info — starting batch_size=4, will auto-reduce on OOM");
-                }
+                    4
+                };
+                effective_batch_size = batch_size;
+                grad_accum_steps = 1;
+                batch_calibrated = true;
+                h_mini = min_h;
+                info!("Initial batch_size={batch_size} from VRAM estimate. Continuous training will measure and adjust.");
             }
 
             if !use_gpu {
@@ -1371,25 +1359,40 @@ async fn run_gpu_stress_test_child(checkpoint: &str, batch_size: usize, seq_len:
         .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
         .init::<GpuBackend, DistrainTransformerModule<GpuBackend>>();
 
-    let start = Instant::now();
-    let tokens: Vec<i64> = (0..(batch_size * seq_len))
-        .map(|i| (trainer::splitmix64_pub(i as u64) % model_config.vocab_size as u64) as i64)
-        .collect();
-    let batch = Tensor::<GpuBackend, 2, Int>::from_data(
-        TensorData::new(tokens, [batch_size, seq_len]), &device,
-    );
-    let loss = compute_lm_loss(&module, &rope_cos, &rope_sin, batch);
-    let loss_val: f64 = loss.clone().into_scalar().elem();
+    // Allocate the same extra memory that real training uses:
+    // - start_params snapshot (for delta computation)
+    // - error buffer (for compression)
+    // This ensures the stress test measures realistic available VRAM.
+    let _start_params_snapshot = start_params.clone(); // ~500MB for Tiny 125M
+    let _error_buffer: std::collections::HashMap<String, Vec<f32>> = start_params
+        .iter()
+        .map(|(k, v)| (k.clone(), vec![0.0f32; v.len()]))
+        .collect(); // another ~500MB
 
-    if loss_val == 0.0 || loss_val.is_nan() || loss_val.is_infinite() || loss_val < 0.0 {
-        anyhow::bail!("GPU produced invalid loss={loss_val}");
+    let start = Instant::now();
+    let mut secs_total = 0.0f64;
+    let num_steps = 3u64; // multiple steps to catch memory growth from caching
+
+    for step in 0..num_steps {
+        let tokens: Vec<i64> = (0..(batch_size * seq_len))
+            .map(|i| (trainer::splitmix64_pub((i + step as usize * batch_size * seq_len) as u64) % model_config.vocab_size as u64) as i64)
+            .collect();
+        let batch = Tensor::<GpuBackend, 2, Int>::from_data(
+            TensorData::new(tokens, [batch_size, seq_len]), &device,
+        );
+        let loss = compute_lm_loss(&module, &rope_cos, &rope_sin, batch);
+        let loss_val: f64 = loss.clone().into_scalar().elem();
+
+        if loss_val == 0.0 || loss_val.is_nan() || loss_val.is_infinite() || loss_val < 0.0 {
+            anyhow::bail!("GPU produced invalid loss={loss_val} at step {step}");
+        }
+
+        let grads = loss.backward();
+        let grads_params = GradientsParams::from_grads(grads, &module);
+        module = optim.step(3e-4, module, grads_params);
     }
 
-    let grads = loss.backward();
-    let grads_params = GradientsParams::from_grads(grads, &module);
-    let _module = optim.step(3e-4, module, grads_params);
-
-    let secs_per_step = start.elapsed().as_secs_f64();
+    let secs_per_step = start.elapsed().as_secs_f64() / num_steps as f64;
     // Print result for parent to parse
     println!("GPU_STRESS_OK {secs_per_step:.6}");
     Ok(())

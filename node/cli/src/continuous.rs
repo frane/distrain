@@ -363,8 +363,10 @@ fn continuous_training_loop(
     let lr_min = params.training_params.lr_min;
     let h_mini = params.h_mini;
     let seq_len = params.seq_len;
-    let micro_batch_size = params.batch_size;
     let grad_accum_steps = params.grad_accum_steps;
+
+    let micro_batch_size = params.batch_size;
+
     let effective_batch = micro_batch_size * grad_accum_steps;
 
     // Track state across rounds
@@ -977,11 +979,21 @@ pub async fn run_continuous_training(
         error_buffer = eb_out;
         seq_num = new_seq_num;
 
-        // If training panicked (likely OOM), reduce batch size and retry
+        // If training panicked (likely GPU OOM), reduce batch_size and retry.
+        // The inner loop creates model/optimizer fresh each iteration, so reducing
+        // batch_size here means the next iteration uses less GPU memory.
+        // cubecl may leak some memory after panic, but reducing batch_size compensates.
         if panicked {
             let old_bs = batch_size;
-            batch_size = (batch_size * 3 / 4).max(1);
+            batch_size = (batch_size / 2).max(1);
+            if batch_size == old_bs {
+                // Already at 1 and still failing — GPU is broken, exit for restart
+                error!("GPU OOM at batch_size=1. Exiting for clean restart.");
+                std::process::exit(1);
+            }
             warn!("Training panicked — reducing batch_size: {old_bs} → {batch_size}");
+            // Brief pause to let GPU memory settle
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
         // H_mini auto-tune based on measured bandwidth
