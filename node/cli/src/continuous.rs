@@ -359,7 +359,7 @@ pub struct ContinuousTrainingParams {
     /// Starting seq_num (persists across inner loop restarts).
     pub initial_seq_num: u64,
     /// Pre-loaded batches for the first round.
-    pub initial_batches: Vec<Vec<i64>>,
+    pub data_loader: crate::data::DataLoader,
     /// Shared bandwidth measurement from delta_uploader (bytes/sec).
     pub measured_bandwidth_bps: Arc<AtomicU64>,
 }
@@ -419,9 +419,6 @@ fn continuous_training_loop(
     let lr_max = params.training_params.lr_max * lr_scale;
     info!("LR scaled {lr_scale:.1}x for batch={effective_batch}: lr_max={lr_max:.2e}");
 
-    // Loss-based lr uses the existing loss_ema (updated every step in the training loop).
-    // High loss → high lr (learn fast). Low loss → low lr (refine).
-    let ln_vocab = (params.model_config.vocab_size as f64).ln(); // ~10.4 for 32768
 
     let h_mini = params.h_mini;
     let seq_len = params.seq_len;
@@ -447,7 +444,7 @@ fn continuous_training_loop(
     let mut first_round = true;
 
     // Batch iterator — refilled on checkpoint swap
-    let mut batch_iter = params.initial_batches.into_iter();
+    let mut data_loader = params.data_loader;
 
     info!(
         "Continuous training started: v{current_version}, H_mini={h_mini}, batch={micro_batch_size}x{grad_accum_steps}, lr={lr_max:.2e}"
@@ -579,52 +576,17 @@ fn continuous_training_loop(
             first_round = false;
         }
 
-        // ── 3. Get next batch ───────────────────────────────────────
-        let tokens = match batch_iter.next() {
-            Some(t) => t,
-            None => {
-                // Ran out of pre-generated batches. This happens when:
-                // - All H_mini * grad_accum_steps batches consumed
-                // - Need to return for a new data load cycle
-                info!("Batch iterator exhausted after {global_step} global steps, returning for refill");
-                // Flush partial round
-                if round_step > 0 && loss_count > 0 {
-                    let mean_loss = loss_sum / loss_count as f64;
-                    let bw = params.measured_bandwidth_bps.load(Ordering::Relaxed);
-                    if let Some(pkg) = build_delta_package(
-                        &module,
-                        &round_start_params,
-                        mean_loss,
-                        current_version,
-                        &params.node_id,
-                        &mut seq_num,
-                        round_step,
-                        round_tokens,
-                        round_start_time.elapsed().as_secs_f64(),
-                        bw,
-                    ) {
-                        let _ = delta_tx.blocking_send(pkg);
-                    }
-                }
-                return seq_num;
-            }
-        };
+        // ── 3. Get next batch (on the fly, never repeats) ──────────
+        let tokens = data_loader.next_batch_sized(micro_batch_size);
 
         // ── 4. Train one step ───────────────────────────────────────
-        // Use constant lr_max after warmup. No cosine restart per round —
-        // Loss-based lr: adapts from observed loss. No fixed schedule.
-        // lr = lr_max × clamp(loss_ema / ln(vocab), 0.1, 1.0)
-        // At loss 100 (random init): ratio=9.6 → lr=lr_max (full speed)
-        // At loss 10 (ln_vocab):     ratio=1.0 → lr=lr_max (still fast)
-        // At loss 5 (converging):    ratio=0.5 → lr=0.5×lr_max (refining)
-        // At loss 3 (near plateau):  ratio=0.3 → lr=0.3×lr_max (fine-tuning)
+        // Constant lr after warmup. Same as baseline.
+        // Loss-based lr caused overfitting: training loss → 0 reduced lr to near-zero,
+        // locking in memorization. Constant lr is what baseline uses and what works.
         let lr = if first_round && round_step < warmup_steps {
             lr_max * (round_step as f64 / warmup_steps as f64)
-        } else if loss_ema > 0.0 {
-            let ratio = (loss_ema / ln_vocab).clamp(0.1, 1.0);
-            lr_max * ratio
         } else {
-            lr_max // first step, no loss yet
+            lr_max
         };
 
         // Forward pass
@@ -861,16 +823,8 @@ pub async fn run_continuous_training(
 
         // Pre-generate batches for multiple rounds of H_mini steps.
         // Generate enough for 3 rounds so the GPU doesn't starve.
-        let rounds_worth = 30u64; // enough for ~30 rounds before needing refill
-        let total_micro_batches = h_mini * grad_accum_steps as u64 * rounds_worth;
-        let mut data_loader = loader.to_data_loader(batch_size)?;
-        let batches: Vec<Vec<i64>> = (0..total_micro_batches)
-            .map(|_| data_loader.next_batch_sized(batch_size))
-            .collect();
-        info!(
-            "Pre-generated {} micro-batches for ~{rounds_worth} rounds",
-            batches.len()
-        );
+        let data_loader = loader.to_data_loader(batch_size)?;
+        info!("Data loader ready ({} tokens available)", loader.total_tokens_available());
 
         // Set up channels
         // std::sync::mpsc: checkpoint_manager (async) -> training thread (blocking)
@@ -925,7 +879,7 @@ pub async fn run_continuous_training(
             node_id: node_id.clone(),
             initial_version: version,
             initial_seq_num: seq_num,
-            initial_batches: batches,
+            data_loader,
             measured_bandwidth_bps: measured_bandwidth_bps.clone(),
         };
 
