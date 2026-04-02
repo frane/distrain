@@ -17,12 +17,18 @@ RUN cargo build --release -p distrain-coordinator --features cuda -p distrain-no
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates openssh-server curl \
+    ca-certificates openssh-server curl python3 python3-pip git \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
 
+# Python deps for data preparation (run manually: python3 /scripts/prepare_data.py)
+RUN pip3 install datasets tokenizers numpy tqdm
+
 COPY --from=builder /app/target/release/coordinator /usr/local/bin/coordinator
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
+
+# Data prep script (not auto-run — use when bootstrapping fresh training data)
+COPY scripts/prepare_data.py /scripts/prepare_data.py
 
 # Install MinIO server (amd64)
 RUN curl -sSL -o /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio \
