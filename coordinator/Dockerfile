@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /run/sshd
 
 # Python deps for data preparation (run manually: python3 /scripts/prepare_data.py)
-RUN pip3 install datasets tokenizers numpy tqdm
+RUN pip3 install datasets tokenizers numpy tqdm boto3
 
 COPY --from=builder /app/target/release/coordinator /usr/local/bin/coordinator
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
