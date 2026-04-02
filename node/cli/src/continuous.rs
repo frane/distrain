@@ -847,7 +847,7 @@ pub async fn run_continuous_training(
     let mut error_buffer = error_buffer;
     let mut lr_error_buffer = distrain_model::lowrank::LowRankErrorBuffer::default();
     let mut seq_num: u64 = 0;
-    let mut cached_shards: std::collections::HashMap<String, Vec<u16>> = std::collections::HashMap::new();
+    let mut streaming_loader: Option<crate::data::StreamingDataLoader> = None;
 
     // Shared atomics for bandwidth-adaptive compression and H_mini auto-tune
     let measured_bandwidth_bps = Arc::new(AtomicU64::new(0));
@@ -892,60 +892,45 @@ pub async fn run_continuous_training(
         let model_config = infer_model_config(&ckpt_path)?;
         let seq_len = config.seq_len;
 
-        // Compute shard assignment
-        let shard_ids = distrain_model::compute_shard_assignment(
-            &node_id, version, total_shards, shards_per_node,
-        );
-        info!(
-            "Shard assignment for v{version}: {} shards",
-            shard_ids.len()
-        );
-
-        let shard_names: Vec<String> = shard_ids
-            .iter()
-            .filter_map(|&idx| manifest.shards.get(idx).map(|e| e.filename.clone()))
-            .collect();
-
-        // Compute max loaded shards from available memory (each shard ~20MB)
-        let max_loaded_shards = {
-            let budget = crate::resources::compute_memory_budget(
-                &model_config, config,
+        // Shard assignment: computed once and reused across checkpoint changes.
+        // Diversity comes from multiple nodes having different assignments, not from
+        // reshuffling one node's shards every checkpoint (which wastes minutes reloading).
+        // Data loader is only created on first iteration; subsequent checkpoints reuse it.
+        if streaming_loader.is_none() {
+            let shard_ids = distrain_model::compute_shard_assignment(
+                &node_id, 0, total_shards, shards_per_node,
             );
-            match budget {
-                Ok(b) => b.max_shards.max(2).min(shard_ids.len()),
-                Err(_) => 5, // fallback if memory detection fails
-            }
-        };
-        info!("Streaming data loader: max_loaded_shards={max_loaded_shards} (memory-based)");
-        let mut streaming_loader = if cached_shards.is_empty() {
-            crate::data::StreamingDataLoader::new(
-                storage.clone(),
-                shard_names,
-                data_cache.clone(),
-                seq_len,
-                max_loaded_shards,
-            )
-            .await?
-        } else {
-            let prev = std::mem::take(&mut cached_shards);
-            crate::data::StreamingDataLoader::new_with_cache(
-                storage.clone(),
-                shard_names,
-                data_cache.clone(),
-                seq_len,
-                max_loaded_shards,
-                prev,
-            )
-            .await?
-        };
+            info!("Shard assignment: {} shards (fixed across checkpoints)", shard_ids.len());
 
-        streaming_loader.seek_by_seed(seq_num);
+            let shard_names: Vec<String> = shard_ids
+                .iter()
+                .filter_map(|&idx| manifest.shards.get(idx).map(|e| e.filename.clone()))
+                .collect();
+
+            let max_loaded_shards = {
+                let budget = crate::resources::compute_memory_budget(&model_config, config);
+                match budget {
+                    Ok(b) => b.max_shards.max(2).min(shard_ids.len()),
+                    Err(_) => 5,
+                }
+            };
+            info!("Streaming data loader: max_loaded_shards={max_loaded_shards} (memory-based)");
+            streaming_loader = Some(crate::data::StreamingDataLoader::new(
+                storage.clone(),
+                shard_names,
+                data_cache.clone(),
+                seq_len,
+                max_loaded_shards,
+            ).await?);
+        }
+        let loader = streaming_loader.as_mut().unwrap();
+        loader.seek_by_seed(seq_num);
 
         // Pre-generate batches for multiple rounds of H_mini steps.
         // Generate enough for 3 rounds so the GPU doesn't starve.
         let rounds_worth = 3u64;
         let total_micro_batches = h_mini * grad_accum_steps as u64 * rounds_worth;
-        let mut data_loader = streaming_loader.to_data_loader(batch_size)?;
+        let mut data_loader = loader.to_data_loader(batch_size)?;
         let batches: Vec<Vec<i64>> = (0..total_micro_batches)
             .map(|_| data_loader.next_batch_sized(batch_size))
             .collect();
@@ -953,9 +938,6 @@ pub async fn run_continuous_training(
             "Pre-generated {} micro-batches for ~{rounds_worth} rounds",
             batches.len()
         );
-
-        // Save shard data for reuse on next checkpoint change
-        cached_shards = streaming_loader.take_loaded_shards();
 
         // Set up channels
         // std::sync::mpsc: checkpoint_manager (async) -> training thread (blocking)
