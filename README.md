@@ -80,28 +80,44 @@ All presets use the Mistral v0.3 tokenizer (32,768 vocab).
 
 ### Docker deployment (recommended)
 
-**1. Start coordinator** (includes MinIO for storage):
+Three steps: start coordinator, prepare training data (once), start nodes.
+
+**Step 1: Start the coordinator**
+
+The coordinator image includes MinIO (S3-compatible storage), bootstraps a random v0 checkpoint on first start, and persists all data on the `/workspace` volume.
 
 ```bash
 docker run --gpus all \
   -e S3_ACCESS_KEY=distrain \
   -e S3_SECRET_KEY=yoursecret \
   -e PRESET=tiny \
-  -p 8000:8000 -p 9000:9000 \
+  -v distrain-data:/workspace \
+  -p 8000:8000 -p 9000:9000 -p 22:22 \
   ghcr.io/frane/distrain/coordinator:latest
 ```
 
-This bootstraps a v0 checkpoint automatically. For a fresh run, prepare training data:
+**Step 2: Prepare training data (once per dataset)**
+
+The coordinator image includes `prepare_data.py` and the Mistral v0.3 tokenizer. SSH or exec into the container and run:
 
 ```bash
-# SSH into the coordinator container, then:
 python3 /scripts/prepare_data.py fineweb-edu-10bt \
-  --output-dir /tmp/data --upload \
+  --output-dir /tmp/data \
+  --upload \
   --s3-endpoint http://localhost:9000 \
-  --s3-bucket distrain-training
+  --s3-bucket distrain-training \
+  --s3-access-key distrain \
+  --s3-secret-key yoursecret
 ```
 
-**2. Start training nodes** (any number, any GPU):
+This downloads FineWeb-Edu from HuggingFace (~10B tokens), tokenizes it with batch encoding (~1 hour), and uploads 1,102 shards to MinIO. The data is stored on the persistent volume — you only need to do this once.
+
+Available datasets:
+- `fineweb-edu-10bt` — 10B tokens, good for 125M-1B models
+- `fineweb-edu-100bt` — 100B tokens, for 7B+ models
+- `test` — random test shards (no download, instant)
+
+**Step 3: Start training nodes**
 
 ```bash
 docker run --gpus all \
@@ -113,7 +129,7 @@ docker run --gpus all \
   ghcr.io/frane/distrain/node-cuda:latest
 ```
 
-Each node auto-detects its GPU, computes optimal batch size from VRAM and model architecture, scales learning rate accordingly, and starts training immediately. No manual configuration.
+Each node auto-detects its GPU, computes optimal batch size from VRAM and model architecture, scales learning rate accordingly, and starts training immediately. No manual configuration. Start as many nodes as you want — the protocol handles heterogeneous hardware automatically.
 
 ### Local development
 
