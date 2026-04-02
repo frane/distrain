@@ -330,10 +330,25 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     tokio::fs::create_dir_all(&cache_dir).await?;
 
     // Load data manifest from R2 (shard list — actual data loaded per round)
+    // Retry: network may not be ready immediately on container start.
     info!("Loading data manifest from storage...");
-    let (manifest, data_cache) = data::DataLoader::load_manifest(&storage, &cache_dir)
-        .await
-        .context("Failed to load data manifest. Run: python tools/prepare_data.py fineweb-edu-10bt --output-dir data/ --upload")?;
+    let (manifest, data_cache) = {
+        let mut result = None;
+        for attempt in 1..=10u32 {
+            match data::DataLoader::load_manifest(&storage, &cache_dir).await {
+                Ok(r) => { result = Some(r); break; }
+                Err(e) => {
+                    if attempt < 10 {
+                        warn!("Manifest download failed (attempt {attempt}/10): {e:#}. Retrying in {attempt}s...");
+                        tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
+                    } else {
+                        anyhow::bail!("Failed to load data manifest after 10 attempts: {e:#}");
+                    }
+                }
+            }
+        }
+        result.unwrap()
+    };
 
     let total_shards = manifest.shards.len();
     let params = config
