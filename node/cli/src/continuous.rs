@@ -709,49 +709,11 @@ fn build_delta_package(
         }
     }
 
-    // Tier 2: Low-rank compression. Rank chosen to fit budget.
-    if bandwidth_bps > 0 {
-        // Estimate rank that fits: each rank adds ~(m+n)*4 bytes per tensor.
-        // Start with rank 16, try lower if doesn't fit.
-        for rank in [32, 16, 8, 4] {
-            if let Ok((compressed, lr_stats)) = distrain_model::compression::compress_delta_lowrank(
-                &delta, &shapes, rank, lr_error_buffer,
-            ) {
-                if (compressed.len() as u64) <= upload_budget {
-                    info!(
-                        "Bandwidth-adaptive: low-rank r={rank} fits! {}MB, {:.1}x compression, error={:.4} (bw={:.1} MB/s)",
-                        compressed.len() / (1024 * 1024), lr_stats.compression_ratio,
-                        lr_stats.reconstruction_error, bandwidth_bps as f64 / 1e6,
-                    );
-                    *seq_num += 1;
-                    let delta_key = distrain_shared::paths::delta_path(version, node_id, *seq_num);
-                    let push_body = DeltaPush {
-                        node_id: distrain_shared::types::NodeId(node_id.to_string()),
-                        seq_num: *seq_num,
-                        checkpoint_version: version,
-                        inner_steps: steps,
-                        delta_key: delta_key.clone(),
-                        training_loss: mean_loss,
-                        tokens_processed: tokens,
-                        training_time_secs: elapsed_secs,
-                        compressed_bytes: Some(compressed.len() as u64),
-                        dense_norm: None,
-                        sparse_norm: None,
-                    };
-                    return Some(DeltaPackage {
-                        compressed_bytes: compressed,
-                        delta_key,
-                        push_body,
-                        seq_num: *seq_num,
-                        training_loss: mean_loss,
-                        tokens_processed: tokens,
-                        compression_stats: None,
-                    });
-                }
-            }
-        }
-        info!("Bandwidth-adaptive: low-rank didn't fit, falling back to top-k");
-    }
+    // Tier 2: Low-rank compression — DISABLED.
+    // Training deltas from scratch are full-rank (not like LoRA fine-tuning).
+    // Rank 32 gives 88-98% reconstruction error = almost no signal survives.
+    // TODO: revisit with higher rank, hybrid (low-rank + top-k residual),
+    // or enable only after model has converged (deltas become more structured).
 
     // Tier 3: Top-k sparsification (always fits, adjustable k)
     let compression_config = if bandwidth_bps == 0 {
