@@ -27,8 +27,9 @@ RUN pip3 install datasets tokenizers numpy tqdm
 COPY --from=builder /app/target/release/coordinator /usr/local/bin/coordinator
 COPY --from=builder /app/target/release/distrain-node /usr/local/bin/distrain-node
 
-# Data prep script (not auto-run — use when bootstrapping fresh training data)
+# Data prep script + tokenizer (run manually: python3 /scripts/prepare_data.py)
 COPY scripts/prepare_data.py /scripts/prepare_data.py
+COPY tokenizers/ /tokenizers/
 
 # Install MinIO server (amd64)
 RUN curl -sSL -o /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio \
