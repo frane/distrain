@@ -9,13 +9,14 @@ path = "src/main.rs"
 
 [features]
 default = []
-cuda = ["distrain-model/cuda"]
+cuda = ["distrain-model/cuda", "dep:burn-cuda"]
 
 [dependencies]
 distrain-shared = { path = "../core/shared" }
 distrain-model = { path = "../core/model" }
 burn = { workspace = true }
 burn-ndarray = { workspace = true }
+burn-cuda = { version = "0.20", optional = true, default-features = false, features = ["std", "autotune"] }
 anyhow = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }

@@ -3028,6 +3028,7 @@ dependencies = [
  "anyhow",
  "axum 0.7.9",
  "burn",
+ "burn-cuda",
  "burn-ndarray",
  "chrono",
  "distrain-model",
