@@ -133,11 +133,24 @@ def tokenize_and_shard(
         shard_idx += 1
         buffer = buffer[tokens_per_shard:]
 
+    # Batch tokenization for speed — ~10x faster than one-at-a-time
+    batch = []
+    BATCH_SIZE = 1000
     for text in texts:
         if not text or not text.strip():
             continue
-        tokens = enc.encode(text).ids
-        buffer.extend(tokens)
+        batch.append(text)
+        if len(batch) >= BATCH_SIZE:
+            for encoded in enc.encode_batch(batch):
+                buffer.extend(encoded.ids)
+            batch.clear()
+            while len(buffer) >= tokens_per_shard:
+                flush_shard()
+    # Flush remaining batch
+    if batch:
+        for encoded in enc.encode_batch(batch):
+            buffer.extend(encoded.ids)
+        batch.clear()
         while len(buffer) >= tokens_per_shard:
             flush_shard()
 
