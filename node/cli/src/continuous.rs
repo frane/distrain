@@ -709,24 +709,50 @@ fn build_delta_package(
         }
     }
 
-    // Tier 2: Low-rank compression — only if reconstruction is good enough.
-    // Early training: deltas are full-rank, low-rank gives >50% error → skip.
-    // Late training: deltas become structured, low-rank works → use it.
+    // Tier 2: Low-rank compression — use if it gives better signal-per-byte than top-k.
+    // Compare: low-rank signal retained per byte vs top-k signal retained per byte.
+    // Whichever delivers more gradient signal per upload byte wins.
     if bandwidth_bps > 0 {
+        // First, compute what top-k would give us (trial, don't commit)
+        let topk_k = adaptive_top_k(mean_loss, Some(upload_budget), raw_param_bytes);
+        let topk_config = CompressionConfig {
+            top_k_fraction: topk_k,
+            quantize_int8: false,
+            ..CompressionConfig::default()
+        };
+        let mut trial_topk_eb = error_buffer.clone();
+        let topk_signal_per_byte = if let Ok((topk_compressed, topk_stats)) = compress_delta(&delta, &shapes, &topk_config, &mut trial_topk_eb) {
+            // signal = retention_ratio (fraction of gradient norm preserved)
+            // cost = compressed bytes
+            let bytes = topk_compressed.len().max(1) as f64;
+            topk_stats.retention_ratio / bytes
+        } else {
+            0.0
+        };
+
+        // Try low-rank at various ranks
         for rank in [32, 16, 8, 4] {
-            // Trial compression with a cloned error buffer (don't commit yet)
             let mut trial_lr_eb = lr_error_buffer.clone();
-            if let Ok((compressed, lr_stats)) = distrain_model::compression::compress_delta_lowrank(
+            if let Ok((lr_compressed, lr_stats)) = distrain_model::compression::compress_delta_lowrank(
                 &delta, &shapes, rank, &mut trial_lr_eb,
             ) {
-                // Only use if reconstruction error < 50% AND fits upload budget
-                if lr_stats.reconstruction_error < 0.5 && (compressed.len() as u64) <= upload_budget {
-                    // Good enough — commit to low-rank
+                if (lr_compressed.len() as u64) > upload_budget {
+                    continue; // doesn't fit
+                }
+                // signal = 1 - reconstruction_error
+                let lr_signal = 1.0 - lr_stats.reconstruction_error;
+                let lr_bytes = lr_compressed.len().max(1) as f64;
+                let lr_signal_per_byte = lr_signal / lr_bytes;
+
+                if lr_signal_per_byte > topk_signal_per_byte && lr_signal > 0.1 {
+                    // Low-rank wins — better signal per byte
                     *lr_error_buffer = trial_lr_eb;
                     info!(
-                        "Bandwidth-adaptive: low-rank r={rank} fits! {}MB, {:.1}x, error={:.2}% (bw={:.1} MB/s)",
-                        compressed.len() / (1024 * 1024), lr_stats.compression_ratio,
-                        lr_stats.reconstruction_error * 100.0, bandwidth_bps as f64 / 1e6,
+                        "Bandwidth-adaptive: low-rank r={rank} wins! {}MB, signal={:.0}%, {:.1}x better signal/byte than top-k (bw={:.1} MB/s)",
+                        lr_compressed.len() / (1024 * 1024),
+                        lr_signal * 100.0,
+                        lr_signal_per_byte / topk_signal_per_byte.max(1e-20),
+                        bandwidth_bps as f64 / 1e6,
                     );
                     *seq_num += 1;
                     let delta_key = distrain_shared::paths::delta_path(version, node_id, *seq_num);
@@ -739,12 +765,12 @@ fn build_delta_package(
                         training_loss: mean_loss,
                         tokens_processed: tokens,
                         training_time_secs: elapsed_secs,
-                        compressed_bytes: Some(compressed.len() as u64),
+                        compressed_bytes: Some(lr_compressed.len() as u64),
                         dense_norm: None,
                         sparse_norm: None,
                     };
                     return Some(DeltaPackage {
-                        compressed_bytes: compressed,
+                        compressed_bytes: lr_compressed,
                         delta_key,
                         push_body,
                         seq_num: *seq_num,
@@ -752,9 +778,6 @@ fn build_delta_package(
                         tokens_processed: tokens,
                         compression_stats: None,
                     });
-                } else if lr_stats.reconstruction_error >= 0.5 {
-                    info!("Low-rank r={rank}: error={:.0}% too high, using top-k", lr_stats.reconstruction_error * 100.0);
-                    break; // lower rank won't help
                 }
             }
         }
