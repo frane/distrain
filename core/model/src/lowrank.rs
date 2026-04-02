@@ -232,6 +232,7 @@ fn truncated_svd(matrix: &[f32], m: usize, n: usize, r: usize) -> (Vec<f32>, Vec
 // ── Matrix operations (no external dependency) ──────────────────────
 
 /// C = A × B where A ∈ R^{m×k}, B ∈ R^{k×n}, C ∈ R^{m×n}
+#[allow(dead_code)]
 fn matmul(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
     c.fill(0.0);
     for i in 0..m {
@@ -246,6 +247,7 @@ fn matmul(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
 }
 
 /// C = A^T × B where A ∈ R^{m×k}, B ∈ R^{m×n}, C ∈ R^{k×n}
+#[allow(dead_code)]
 fn matmul_at_b(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
     c.fill(0.0);
     for i in 0..m {
@@ -274,6 +276,7 @@ fn matmul_uvt(u: &[f32], v: &[f32], m: usize, n: usize, r: usize, c: &mut [f32])
 }
 
 /// Modified Gram-Schmidt QR: returns Q ∈ R^{m×r} (orthonormal columns).
+#[allow(dead_code)]
 fn qr_q(a: &[f32], m: usize, r: usize) -> Vec<f32> {
     let mut q = a.to_vec();
 

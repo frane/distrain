@@ -8,7 +8,6 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use burn::tensor::{Tensor, TensorData};
-use burn_ndarray::NdArray;
 use distrain_model::checkpoint::{
     load_safetensors_map_from_bytes, load_safetensors_shapes_from_bytes,
     save_state_dict_safetensors_bytes,
@@ -23,7 +22,7 @@ use tracing::{info, warn};
 #[cfg(feature = "cuda")]
 type AggBackend = burn_cuda::Cuda;
 #[cfg(not(feature = "cuda"))]
-type AggBackend = NdArray;
+type AggBackend = burn_ndarray::NdArray;
 
 /// GPU-accelerated weighted average of deltas using burn tensors.
 fn weighted_average_gpu(

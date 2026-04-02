@@ -359,7 +359,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     let mut shards_per_node = requested_shards;
     let mut budget_computed = false;
     // Measured secs/step for the real model on GPU — set by stress test, used by watchdog.
-    let mut gpu_secs_per_step: Option<f64> = None;
+    let gpu_secs_per_step: Option<f64> = None;
     // Whether the GPU stress test has been run (only once, on first iteration).
     let mut stress_tested = false;
     // Whether the last round was aborted due to memory pressure.
@@ -371,7 +371,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     // Persistent error buffer for compression error feedback across rounds.
     let mut error_buffer = distrain_model::compression::ErrorBuffer::new();
     // Last round's elapsed time (for poll delay estimation).
-    let mut result_elapsed: f64 = 0.0;
+    let mut _result_elapsed: f64 = 0.0;
     // Auto-calibrated batch size and gradient accumulation steps.
     // If user specified batch_size (via toml or force_batch_size), use it.
     // Otherwise auto-detect from VRAM during calibration.
@@ -875,7 +875,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         }?;
 
         last_trained_version = Some(version);
-        result_elapsed = result.elapsed_secs;
+        _result_elapsed = result.elapsed_secs;
 
         // Pipeline: evict consumed shards and download next ones while we handle the result.
         // This ensures fresh shard data is ready for the next round.
@@ -1370,7 +1370,7 @@ async fn run_gpu_stress_test_child(checkpoint: &str, batch_size: usize, seq_len:
         .collect(); // another ~500MB
 
     let start = Instant::now();
-    let mut secs_total = 0.0f64;
+    let _secs_total = 0.0f64;
     let num_steps = 3u64; // multiple steps to catch memory growth from caching
 
     for step in 0..num_steps {

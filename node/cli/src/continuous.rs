@@ -32,7 +32,7 @@ use distrain_model::config::ModelConfig;
 use distrain_model::model::{
     compute_lm_loss, precompute_rope_tables, DistrainTransformerModule,
 };
-use distrain_model::training::{compute_outer_delta, cosine_lr};
+use distrain_model::training::compute_outer_delta;
 use distrain_model::{GpuBackend, GpuDevice};
 use distrain_shared::storage::Storage;
 use distrain_shared::types::DeltaPush;
@@ -368,7 +368,7 @@ fn continuous_training_loop(
     let effective_batch = micro_batch_size * grad_accum_steps;
     let lr_scale = effective_batch as f64 / reference_batch as f64;
     let lr_max = params.training_params.lr_max * lr_scale;
-    let lr_min = params.training_params.lr_min * lr_scale;
+    let _lr_min = params.training_params.lr_min * lr_scale;
     info!("LR scaled {lr_scale:.1}x for batch={effective_batch}: lr_max={lr_max:.2e}");
 
     let h_mini = params.h_mini;

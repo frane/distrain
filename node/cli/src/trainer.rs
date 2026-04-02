@@ -1047,7 +1047,7 @@ pub async fn stress_test_cpu(
     );
 
     let module = DistrainTransformerModule::<CpuBackend>::new(&model_config, &device);
-    let mut module = module.load_state_dict(&start_params, &device);
+    let module = module.load_state_dict(&start_params, &device);
     let mut optim = AdamWConfig::new()
         .with_weight_decay(0.1)
         .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
