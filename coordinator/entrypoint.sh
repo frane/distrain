@@ -23,7 +23,7 @@ VOCAB_SIZE="${VOCAB_SIZE:-32768}"
 KEEP_VERSIONS="${KEEP_VERSIONS:-3}"
 PRESET="${PRESET:-tiny}"
 
-MINIO_DATA_DIR="/data/minio"
+MINIO_DATA_DIR="/workspace/minio-data"
 MINIO_PORT=9000
 
 # --- SSH (optional, for RunPod-style access) ---
