@@ -861,7 +861,7 @@ pub async fn run_continuous_training(
 
         // Pre-generate batches for multiple rounds of H_mini steps.
         // Generate enough for 3 rounds so the GPU doesn't starve.
-        let rounds_worth = 3u64;
+        let rounds_worth = 30u64; // enough for ~30 rounds before needing refill
         let total_micro_batches = h_mini * grad_accum_steps as u64 * rounds_worth;
         let mut data_loader = loader.to_data_loader(batch_size)?;
         let batches: Vec<Vec<i64>> = (0..total_micro_batches)
