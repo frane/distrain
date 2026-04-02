@@ -60,7 +60,60 @@ Stale deltas get exponentially less weight: `0.9^staleness`. The merge is commut
 - **Scale.** Tested with 3 GPUs. The protocol is designed for 50-1000+ nodes but hasn't been validated at that scale.
 - **Single coordinator.** Current architecture has one coordinator. Peer-to-peer topology is a natural extension.
 
+## Model presets
+
+Training a different model size is just an environment variable:
+
+| Preset | Params | Hidden | Layers | Heads | KV Heads | FFN | VRAM needed |
+|--------|--------|--------|--------|-------|----------|-----|-------------|
+| `micro-test` | 64K | 64 | 2 | 2 | 2 | 256 | <1 GB |
+| `tiny` | 125M | 768 | 12 | 12 | 4 | 2048 | ~8 GB |
+| `small` | 1.13B | 2048 | 24 | 16 | 4 | 5504 | ~40 GB |
+| `medium` | 7B | 4096 | 32 | 32 | 8 | 11008 | ~80 GB |
+| `large` | 13B | 5120 | 40 | 40 | 8 | 13824 | ~160 GB |
+
+Set `PRESET=small` on the coordinator to bootstrap a 1B model. Nodes auto-detect the architecture from the checkpoint — no configuration needed on their side.
+
+All presets use the Mistral v0.3 tokenizer (32,768 vocab).
+
 ## Running it
+
+### Docker deployment (recommended)
+
+**1. Start coordinator** (includes MinIO for storage):
+
+```bash
+docker run --gpus all \
+  -e S3_ACCESS_KEY=distrain \
+  -e S3_SECRET_KEY=yoursecret \
+  -e PRESET=tiny \
+  -p 8000:8000 -p 9000:9000 \
+  ghcr.io/frane/distrain/coordinator:latest
+```
+
+This bootstraps a v0 checkpoint automatically. For a fresh run, prepare training data:
+
+```bash
+# SSH into the coordinator container, then:
+python3 /scripts/prepare_data.py fineweb-edu-10bt \
+  --output-dir /tmp/data --upload \
+  --s3-endpoint http://localhost:9000 \
+  --s3-bucket distrain-training
+```
+
+**2. Start training nodes** (any number, any GPU):
+
+```bash
+docker run --gpus all \
+  -e COORDINATOR_URL=http://your-coordinator:8000 \
+  -e S3_ENDPOINT=http://your-coordinator:9000 \
+  -e S3_ACCESS_KEY=distrain \
+  -e S3_SECRET_KEY=yoursecret \
+  -e S3_BUCKET=distrain-training \
+  ghcr.io/frane/distrain/node-cuda:latest
+```
+
+Each node auto-detects its GPU, computes optimal batch size from VRAM and model architecture, scales learning rate accordingly, and starts training immediately. No manual configuration.
 
 ### Local development
 
@@ -71,10 +124,10 @@ cargo build --release -p distrain-coordinator -p distrain-node
 docker compose -f docker/docker-compose.yml up -d minio
 
 # Prepare training data
-pip install datasets tokenizers numpy
+pip install datasets tokenizers numpy tqdm
 python scripts/prepare_data.py fineweb-edu-10bt --output-dir data/fineweb --upload
 
-# Bootstrap a model
+# Bootstrap a model (change --preset for different sizes)
 ./target/release/distrain-node bootstrap --config node.toml --preset tiny
 
 # Run coordinator
@@ -83,20 +136,6 @@ RUST_LOG=info ./target/release/coordinator
 # Run node (separate terminal)
 ./target/release/distrain-node start --config node.toml
 ```
-
-### Docker (CUDA)
-
-```bash
-docker run --gpus all \
-  -e COORDINATOR_URL=http://your-coordinator:8000 \
-  -e S3_ENDPOINT=http://your-minio:9000 \
-  -e S3_ACCESS_KEY=distrain \
-  -e S3_SECRET_KEY=secret \
-  -e S3_BUCKET=distrain-training \
-  ghcr.io/frane/distrain/node-cuda:latest
-```
-
-Auto-detects GPU, estimates batch size from VRAM, starts training immediately.
 
 ## What's here
 
