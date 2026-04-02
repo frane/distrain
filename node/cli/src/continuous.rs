@@ -709,11 +709,56 @@ fn build_delta_package(
         }
     }
 
-    // Tier 2: Low-rank compression — DISABLED.
-    // Training deltas from scratch are full-rank (not like LoRA fine-tuning).
-    // Rank 32 gives 88-98% reconstruction error = almost no signal survives.
-    // TODO: revisit with higher rank, hybrid (low-rank + top-k residual),
-    // or enable only after model has converged (deltas become more structured).
+    // Tier 2: Low-rank compression — only if reconstruction is good enough.
+    // Early training: deltas are full-rank, low-rank gives >50% error → skip.
+    // Late training: deltas become structured, low-rank works → use it.
+    if bandwidth_bps > 0 {
+        for rank in [32, 16, 8, 4] {
+            // Trial compression with a cloned error buffer (don't commit yet)
+            let mut trial_lr_eb = lr_error_buffer.clone();
+            if let Ok((compressed, lr_stats)) = distrain_model::compression::compress_delta_lowrank(
+                &delta, &shapes, rank, &mut trial_lr_eb,
+            ) {
+                // Only use if reconstruction error < 50% AND fits upload budget
+                if lr_stats.reconstruction_error < 0.5 && (compressed.len() as u64) <= upload_budget {
+                    // Good enough — commit to low-rank
+                    *lr_error_buffer = trial_lr_eb;
+                    info!(
+                        "Bandwidth-adaptive: low-rank r={rank} fits! {}MB, {:.1}x, error={:.2}% (bw={:.1} MB/s)",
+                        compressed.len() / (1024 * 1024), lr_stats.compression_ratio,
+                        lr_stats.reconstruction_error * 100.0, bandwidth_bps as f64 / 1e6,
+                    );
+                    *seq_num += 1;
+                    let delta_key = distrain_shared::paths::delta_path(version, node_id, *seq_num);
+                    let push_body = DeltaPush {
+                        node_id: distrain_shared::types::NodeId(node_id.to_string()),
+                        seq_num: *seq_num,
+                        checkpoint_version: version,
+                        inner_steps: steps,
+                        delta_key: delta_key.clone(),
+                        training_loss: mean_loss,
+                        tokens_processed: tokens,
+                        training_time_secs: elapsed_secs,
+                        compressed_bytes: Some(compressed.len() as u64),
+                        dense_norm: None,
+                        sparse_norm: None,
+                    };
+                    return Some(DeltaPackage {
+                        compressed_bytes: compressed,
+                        delta_key,
+                        push_body,
+                        seq_num: *seq_num,
+                        training_loss: mean_loss,
+                        tokens_processed: tokens,
+                        compression_stats: None,
+                    });
+                } else if lr_stats.reconstruction_error >= 0.5 {
+                    info!("Low-rank r={rank}: error={:.0}% too high, using top-k", lr_stats.reconstruction_error * 100.0);
+                    break; // lower rank won't help
+                }
+            }
+        }
+    }
 
     // Tier 3: Top-k sparsification (always fits, adjustable k)
     let compression_config = if bandwidth_bps == 0 {
