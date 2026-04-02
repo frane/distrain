@@ -412,13 +412,16 @@ fn continuous_training_loop(
     let micro_batch_size = params.batch_size;
     let grad_accum_steps = params.grad_accum_steps;
 
-    // Scale learning rate linearly with batch size (reference: batch=4).
+    // Scale base learning rate linearly with batch size (reference: batch=4).
     let reference_batch = 4usize;
     let effective_batch = micro_batch_size * grad_accum_steps;
     let lr_scale = effective_batch as f64 / reference_batch as f64;
     let lr_max = params.training_params.lr_max * lr_scale;
-    let _lr_min = params.training_params.lr_min * lr_scale;
     info!("LR scaled {lr_scale:.1}x for batch={effective_batch}: lr_max={lr_max:.2e}");
+
+    // Loss-based lr uses the existing loss_ema (updated every step in the training loop).
+    // High loss → high lr (learn fast). Low loss → low lr (refine).
+    let ln_vocab = (params.model_config.vocab_size as f64).ln(); // ~10.4 for 32768
 
     let h_mini = params.h_mini;
     let seq_len = params.seq_len;
@@ -609,13 +612,19 @@ fn continuous_training_loop(
 
         // ── 4. Train one step ───────────────────────────────────────
         // Use constant lr_max after warmup. No cosine restart per round —
-        // the outer optimizer (checkpoint merge) handles the learning schedule.
-        // Warmup only on the very first round of the very first checkpoint.
+        // Loss-based lr: adapts from observed loss. No fixed schedule.
+        // lr = lr_max × clamp(loss_ema / ln(vocab), 0.1, 1.0)
+        // At loss 100 (random init): ratio=9.6 → lr=lr_max (full speed)
+        // At loss 10 (ln_vocab):     ratio=1.0 → lr=lr_max (still fast)
+        // At loss 5 (converging):    ratio=0.5 → lr=0.5×lr_max (refining)
+        // At loss 3 (near plateau):  ratio=0.3 → lr=0.3×lr_max (fine-tuning)
         let lr = if first_round && round_step < warmup_steps {
-            // Linear warmup
             lr_max * (round_step as f64 / warmup_steps as f64)
+        } else if loss_ema > 0.0 {
+            let ratio = (loss_ema / ln_vocab).clamp(0.1, 1.0);
+            lr_max * ratio
         } else {
-            lr_max
+            lr_max // first step, no loss yet
         };
 
         // Forward pass
