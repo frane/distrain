@@ -174,7 +174,7 @@ These are the real problems we haven't solved yet:
 ## Future directions
 
 - **Scale to 7B with MoE.** Expert sharding across nodes — each node holds one expert + shared layers. Most parameters never cross the network. DiPaCo-style document routing.
-- **Delta streaming.** Push every 5-10 steps instead of 50. Smaller deltas, less staleness, fresher gradients. Requires fast coordinator merge (<1s).
+- **Higher-frequency pushing.** The bandwidth-adaptive H_mini already supports pushing every 5-10 steps (set `MIN_INNER_STEPS=5`). Needs GPU aggregation on the coordinator to absorb the higher merge rate.
 - **GPU aggregation.** Move weighted averaging to GPU (burn tensors). Reduce merge time from 30s to <1s, enabling higher-frequency checkpoints.
 - **Shard rotation.** Background rotation of training data shards to increase diversity without blocking the GPU. Currently shards are fixed per node.
 - **Desktop app.** The Tauri shell exists. A one-click "contribute to training" app for non-technical users.
