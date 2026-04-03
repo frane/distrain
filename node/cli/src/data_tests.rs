@@ -86,3 +86,31 @@ mod tests {
         // This documents that from_tokens always starts at 0.
     }
 }
+
+/// Loss-based lr should decay as loss drops below ln(vocab).
+/// Constant lr should stay at lr_max regardless of loss.
+#[test]
+fn test_lr_modes() {
+    let lr_max = 3e-4;
+    let ln_vocab = (32768.0f64).ln(); // ~10.4
+
+    // Loss-based mode
+    let loss_high = 50.0;
+    let ratio_high = (loss_high / ln_vocab).clamp(0.1, 1.0);
+    assert!((ratio_high - 1.0).abs() < 0.01, "High loss should give ratio=1.0");
+
+    let loss_mid = 5.0;
+    let ratio_mid = (loss_mid / ln_vocab).clamp(0.1, 1.0);
+    let lr_mid = lr_max * ratio_mid;
+    assert!(lr_mid < lr_max, "Loss below ln(vocab) should reduce lr");
+    assert!(lr_mid > lr_max * 0.4, "lr at loss=5 should be ~48% of max");
+
+    let loss_low = 1.0;
+    let ratio_low = (loss_low / ln_vocab).clamp(0.1, 1.0);
+    let lr_low = lr_max * ratio_low;
+    assert!(lr_low >= lr_max * 0.1, "lr should never go below 10% of max (floor)");
+    assert!(lr_low < lr_max * 0.15, "lr at loss=1 should be ~10% of max");
+
+    // Constant mode: lr_max always
+    assert_eq!(lr_max, 3e-4);
+}

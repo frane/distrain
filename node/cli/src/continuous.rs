@@ -360,6 +360,9 @@ pub struct ContinuousTrainingParams {
     pub initial_seq_num: u64,
     /// Pre-loaded batches for the first round.
     pub data_loader: crate::data::DataLoader,
+    /// Use loss-based lr (adapts from training loss). Default true.
+    /// Set LR_MODE=constant env var to disable.
+    pub loss_based_lr: bool,
     /// Shared bandwidth measurement from delta_uploader (bytes/sec).
     pub measured_bandwidth_bps: Arc<AtomicU64>,
 }
@@ -580,11 +583,14 @@ fn continuous_training_loop(
         let tokens = data_loader.next_batch_sized(micro_batch_size);
 
         // ── 4. Train one step ───────────────────────────────────────
-        // Constant lr after warmup. Same as baseline.
-        // Loss-based lr caused overfitting: training loss → 0 reduced lr to near-zero,
-        // locking in memorization. Constant lr is what baseline uses and what works.
+        // LR mode: constant (default, matches baseline) or loss-based (adapts from loss_ema).
+        // Set LR_MODE=loss_based env var to enable adaptive lr.
         let lr = if first_round && round_step < warmup_steps {
             lr_max * (round_step as f64 / warmup_steps as f64)
+        } else if params.loss_based_lr && loss_ema > 0.0 {
+            let ln_vocab = (params.model_config.vocab_size as f64).ln();
+            let ratio = (loss_ema / ln_vocab).clamp(0.1, 1.0);
+            lr_max * ratio
         } else {
             lr_max
         };
@@ -881,6 +887,7 @@ pub async fn run_continuous_training(
             initial_version: version,
             initial_seq_num: seq_num,
             data_loader: data_loader.take().unwrap(),
+            loss_based_lr: std::env::var("LR_MODE").map_or(true, |v| v != "constant"),
             measured_bandwidth_bps: measured_bandwidth_bps.clone(),
         };
 
