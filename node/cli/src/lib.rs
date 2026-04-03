@@ -6,3 +6,6 @@ pub mod continuous;
 pub mod data;
 pub mod resources;
 pub mod trainer;
+
+#[cfg(test)]
+mod data_tests;
