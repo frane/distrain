@@ -32,6 +32,10 @@ Validation loss on held-out data matches training loss within 0.4% across all cu
 - **Consumer hardware works.** Two Apple Silicon laptops and one Intel CPU trained together across a 10× throughput gap for 2,928 checkpoints.
 - **Compression is tunable.** Top-k retention ranges from 1% (tiny deltas, more signal loss) to 99% (near-raw, best quality). The system auto-selects based on measured upload bandwidth. On fast connections, it sends near-raw deltas for maximum quality.
 
+## Architecture
+
+![Distrain architecture](architecture.png)
+
 ## The protocol
 
 Each node:
