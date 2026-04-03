@@ -155,6 +155,68 @@ scripts/            Data prep, eval, post-training
 docker/             Local dev stack (MinIO, Prometheus, Grafana)
 ```
 
+## Configuration reference
+
+### Coordinator (environment variables)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PRESET` | `tiny` | Model size: `micro-test`, `tiny`, `small`, `medium`, `large` |
+| `COORDINATOR_PORT` | `8000` | HTTP API port |
+| `S3_ACCESS_KEY` | `minioadmin` | MinIO / S3 access key |
+| `S3_SECRET_KEY` | `minioadmin` | MinIO / S3 secret key |
+| `S3_BUCKET` | `distrain-training` | Storage bucket name |
+| `S3_REGION` | `us-east-1` | S3 region |
+| `S3_EXTERNAL_ENDPOINT` | (none) | Public S3 URL for nodes (if different from internal) |
+| `MIN_CONTRIBUTIONS` | `0` | Override min contributions per checkpoint. 0 = auto (half of active nodes) |
+| `MAX_STALENESS` | `30` | Max checkpoint versions a delta can be behind before rejection |
+| `VOCAB_SIZE` | `32768` | Vocabulary size (must match tokenizer) |
+| `KEEP_VERSIONS` | `3` | Number of old checkpoints to retain before cleanup |
+| `MIN_WEIGHT` | `0` | Minimum total weight before checkpoint production |
+| `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+
+### Node (environment variables)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COORDINATOR_URL` | `http://localhost:8000` | Coordinator HTTP endpoint |
+| `S3_ENDPOINT` | `http://localhost:9000` | S3/MinIO endpoint for data and checkpoints |
+| `S3_ACCESS_KEY` | `minioadmin` | S3 access key |
+| `S3_SECRET_KEY` | `minioadmin` | S3 secret key |
+| `S3_BUCKET` | `distrain-training` | Storage bucket |
+| `S3_REGION` | `us-east-1` | S3 region |
+| `GPU_DEVICE` | `0` | GPU device index. `-1` for CPU |
+| `BATCH_SIZE` | (auto) | Force batch size. If unset, auto-detected from VRAM + model architecture |
+| `MIN_INNER_STEPS` | `50` | Minimum steps per push (H_mini floor) |
+| `MAX_INNER_STEPS` | `500` | Maximum steps per push (H_mini ceiling) |
+| `PUSH_INTERVAL` | `60.0` | Target seconds between pushes (used for initial H_mini before bandwidth measurement) |
+| `LR_MODE` | `loss_based` | Learning rate mode: `loss_based` (decays with training loss) or `constant` |
+| `RUST_LOG` | `info` | Log level |
+
+### Node (node.toml fields)
+
+These can also be set in `node.toml` for local development:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `coordinator_url` | string | Coordinator endpoint |
+| `api_key` | string | API key (currently unused) |
+| `gpu_device` | int | GPU index, -1 for CPU |
+| `target_push_interval_secs` | float | Target push interval |
+| `min_inner_steps` | int | H_mini floor |
+| `max_inner_steps` | int | H_mini ceiling |
+| `cache_dir` | string | Local cache for checkpoints and shards |
+| `max_cache_gb` | int | Max cache disk usage (auto-detected from disk in Docker) |
+| `batch_size` | int (optional) | If set, forces batch size. If absent, auto-detected from VRAM |
+| `force_batch_size` | int (optional) | Alias for batch_size (backwards compat) |
+| `seq_len` | int | Sequence length (default 512) |
+| `max_memory_fraction` | float | Max fraction of RAM to use (default 0.8) |
+| `storage.endpoint` | string | S3 endpoint |
+| `storage.bucket` | string | Bucket name |
+| `storage.access_key_id` | string | S3 access key |
+| `storage.secret_access_key` | string | S3 secret key |
+| `storage.region` | string | S3 region |
+
 ## Open questions and known limitations
 
 These are the real problems we haven't solved yet:
