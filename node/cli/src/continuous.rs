@@ -380,16 +380,17 @@ fn continuous_training_loop(
 
 
     heartbeat_url: String,
-) -> u64 {
+) -> (crate::data::DataLoader, u64) {
     let device: GpuDevice = Default::default();
     let mut seq_num: u64 = params.initial_seq_num;
+    let mut data_loader = params.data_loader;
 
     // Load initial checkpoint
     let start_params = match load_safetensors_map(&params.checkpoint_path) {
         Ok(p) => p,
         Err(e) => {
             error!("Failed to load initial checkpoint: {e:#}");
-            return seq_num;
+            return (data_loader, seq_num);
         }
     };
 
@@ -444,7 +445,6 @@ fn continuous_training_loop(
     let mut first_round = true;
 
     // Batch iterator — refilled on checkpoint swap
-    let mut data_loader = params.data_loader;
 
     info!(
         "Continuous training started: v{current_version}, H_mini={h_mini}, batch={micro_batch_size}x{grad_accum_steps}, lr={lr_max:.2e}"
@@ -479,7 +479,7 @@ fn continuous_training_loop(
                         // Best-effort send (don't block training)
                         if delta_tx.blocking_send(pkg).is_err() {
                             warn!("Delta channel closed during checkpoint swap");
-                            return seq_num;
+                            return (data_loader, seq_num);
                         }
                     }
                 }
@@ -496,7 +496,7 @@ fn continuous_training_loop(
                     "Checkpoint swap v{current_version} -> v{new_version} in {:.0}ms, returning for data refill",
                     swap_start.elapsed().as_millis()
                 );
-                return seq_num;
+                return (data_loader, seq_num);
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 // No new checkpoint, continue training
@@ -522,7 +522,7 @@ fn continuous_training_loop(
                         let _ = delta_tx.blocking_send(pkg);
                     }
                 }
-                return seq_num;
+                return (data_loader, seq_num);
             }
         }
 
@@ -562,7 +562,7 @@ fn continuous_training_loop(
             } {
                 if delta_tx.blocking_send(pkg).is_err() {
                     warn!("Delta channel closed, training loop exiting");
-                    return seq_num;
+                    return (data_loader, seq_num);
                 }
             }
 
@@ -743,6 +743,7 @@ pub async fn run_continuous_training(
     // Persistent state across restarts of the inner loop
     let mut seq_num: u64 = 0;
     let mut streaming_loader: Option<crate::data::StreamingDataLoader> = None;
+    let mut data_loader: Option<crate::data::DataLoader> = None;
 
     // Shared atomics for bandwidth-adaptive compression and H_mini auto-tune
     let measured_bandwidth_bps = Arc::new(AtomicU64::new(0));
@@ -819,12 +820,12 @@ pub async fn run_continuous_training(
             ).await?);
         }
         let loader = streaming_loader.as_mut().unwrap();
-        loader.seek_by_seed(seq_num);
-
-        // Pre-generate batches for multiple rounds of H_mini steps.
-        // Generate enough for 3 rounds so the GPU doesn't starve.
-        let data_loader = loader.to_data_loader(batch_size)?;
-        info!("Data loader ready ({} tokens available)", loader.total_tokens_available());
+        // DataLoader created once, persists across checkpoint changes.
+        // Walks sequentially through 2.2B tokens, never resets to position 0.
+        if data_loader.is_none() {
+            data_loader = Some(loader.to_data_loader(batch_size)?);
+            info!("Data loader ready ({} tokens available)", loader.total_tokens_available());
+        }
 
         // Set up channels
         // std::sync::mpsc: checkpoint_manager (async) -> training thread (blocking)
@@ -879,7 +880,7 @@ pub async fn run_continuous_training(
             node_id: node_id.clone(),
             initial_version: version,
             initial_seq_num: seq_num,
-            data_loader,
+            data_loader: data_loader.take().unwrap(),
             measured_bandwidth_bps: measured_bandwidth_bps.clone(),
         };
 
@@ -897,11 +898,15 @@ pub async fn run_continuous_training(
         .await;
 
         let panicked = result.is_err();
-        let new_seq_num = result.unwrap_or_else(|e| {
+        let (dl_out, new_seq_num) = result.unwrap_or_else(|e| {
             error!("Training thread panicked: {e}");
-            seq_num
+            (data_loader.take().unwrap_or_else(|| {
+                // Shouldn't happen, but create a dummy
+                crate::data::DataLoader::from_tokens(vec![vec![0u16; 1024]], 512, 4).unwrap()
+            }), seq_num)
         });
 
+        data_loader = Some(dl_out);
         seq_num = new_seq_num;
 
         // If training panicked (likely GPU OOM), reduce batch_size and retry.
