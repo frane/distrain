@@ -4,23 +4,24 @@ Asynchronous distributed LLM training with zero synchronization. A research prot
 
 Multiple GPUs train the same model without coordination. Each device trains locally, pushes weight updates to a coordinator, and the coordinator merges them. No AllReduce, no synchronous rounds, no waiting for the slowest node. A datacenter GPU and a gaming PC participate in the same training run — each auto-configures and contributes proportionally.
 
-Written entirely in Rust. Single binary, no Python runtime, no PyTorch. Runs on CUDA, Metal, Vulkan, and CPU.
+Written entirely in Rust using the [Burn](https://github.com/tracel-ai/burn) deep learning framework. Single binary, no Python runtime, no PyTorch. The same source code compiles to CUDA, Metal, Vulkan, and CPU — download one ~20 MB file and start training.
 
 > **Status: Research preview.** The protocol works and the code runs, but this is not production software. We're looking for collaborators to test on larger models, more nodes, and real-world network conditions. See [Contributing](#contributing) below.
 
 ## Results
 
-We trained a 125M parameter transformer across seven experiment curves, measuring the gap between distributed and single-GPU training:
+We trained a 125M parameter transformer across six experiment curves, measuring the gap between distributed and single-GPU training:
 
 | Curve | Hardware | Plateau Loss | Gap to Baseline | Key Change |
 |-------|----------|-------------|-----------------|------------|
-| Baseline (A) | 1× RTX 4000 Ada | 4.8 | — | Single GPU, batch=4, lr=3e-4 |
-| B | 3× Mac (2 GPU + 1 CPU) | 6.7 | +1.9 | First distributed, heterogeneous consumer hardware |
-| C | 3× mixed RTX | 6.4 | +1.6 | Outer LR→1.0, compression tuning |
-| D | 3× RTX A4000 | 6.0 | +1.2 | Patience triggers, all nodes contributing |
-| E | 3× A40 | 5.8 | +1.0 | Continuous training (GPU never idles) |
-| H | 3× A40 | 5.98 | +1.2 | Clean comparison: same hyperparams as baseline |
-| G | 3× A40 | 6.4 | +1.6 | Loss-based lr (decays as model converges) |
+| A (Baseline) | 1× RTX 4000 Ada | 4.8 | — | Single GPU, batch=4, lr=3e-4 |
+| B | 3× mixed RTX | 6.4 | +1.6 | Outer LR→1.0, compression tuning |
+| C | 3× RTX A4000 | 6.0 | +1.2 | Patience triggers, all nodes contributing |
+| D | 3× A40 | 5.8 | +1.0 | Continuous training (GPU never idles) |
+| E | 3× A40 | 5.98 | +1.2 | Clean comparison: same hyperparams as baseline |
+| F | 3× A40 | 6.4 | +1.6 | Loss-based lr (negative result) |
+
+We also validated on heterogeneous consumer hardware: two Apple Silicon laptops and one Intel CPU trained together for 2,928 checkpoints despite a 10× throughput gap, reaching loss 6.7.
 
 Validation loss on held-out data matches training loss within 0.4% across all curves, confirming no overfitting.
 
@@ -28,7 +29,7 @@ Validation loss on held-out data matches training loss within 0.4% across all cu
 
 - **The gap is 1.0-1.2 points** between distributed (3 nodes) and single-GPU baseline. This comes from compression loss (~10% signal per round) and checkpoint merge staleness (~30s per merge on CPU).
 - **More contributors = better quality.** 3-contribution checkpoints consistently outperform 2-contribution ones.
-- **Consumer hardware works.** Curve B trained across a 10× throughput gap (Apple Silicon GPUs + Intel CPU) for 2,928 checkpoints.
+- **Consumer hardware works.** Two Apple Silicon laptops and one Intel CPU trained together across a 10× throughput gap for 2,928 checkpoints.
 - **Compression is tunable.** Top-k retention ranges from 1% (tiny deltas, more signal loss) to 99% (near-raw, best quality). The system auto-selects based on measured upload bandwidth. On fast connections, it sends near-raw deltas for maximum quality.
 
 ## The protocol
@@ -36,7 +37,7 @@ Validation loss on held-out data matches training loss within 0.4% across all cu
 Each node:
 1. Downloads the latest checkpoint
 2. Trains continuously (GPU never idles between rounds)
-3. Compresses the delta based on measured upload bandwidth — raw if it fits, top-k sparsification + zstd if not. Error feedback ensures no gradient information is permanently lost.
+3. Compresses the delta based on measured upload bandwidth — raw if it fits, top-k sparsification + zstd if not. Error feedback accumulates dropped values so they re-enter future pushes (resets at checkpoint boundaries).
 4. Uploads to object storage, notifies the coordinator
 5. Coordinator merges deltas with staleness-weighted averaging (outer LR = 1.0)
 6. New checkpoint produced, training continues without pause
@@ -48,7 +49,7 @@ Stale deltas get exponentially less weight: `0.9^staleness`. The merge is commut
 | Parameter | How it's determined |
 |-----------|-------------------|
 | Batch size | Computed from GPU VRAM + model architecture. OOM → halve and retry. |
-| Learning rate | Scales linearly with effective batch size |
+| Learning rate | Constant (3e-4 default) or loss-based decay. Constant worked best in experiments. |
 | Steps per push | Measured from actual upload time |
 | Compression | Bandwidth-adaptive: raw if fast, compressed if slow |
 | Shards in memory | Computed from available RAM |
@@ -61,7 +62,7 @@ Training a different model size is just an environment variable:
 
 | Preset | Params | Hidden | Layers | Heads | KV Heads | FFN | VRAM needed |
 |--------|--------|--------|--------|-------|----------|-----|-------------|
-| `micro-test` | 64K | 64 | 2 | 2 | 2 | 256 | <1 GB |
+| `micro-test` | ~64K | 64 | 2 | 4 | 2 | 128 | <1 GB |
 | `tiny` | 125M | 768 | 12 | 12 | 4 | 2048 | ~8 GB |
 | `small` | 1.13B | 2048 | 24 | 16 | 4 | 5504 | ~40 GB |
 | `medium` | 7B | 4096 | 32 | 32 | 8 | 11008 | ~80 GB |
