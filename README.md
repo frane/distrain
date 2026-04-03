@@ -161,7 +161,7 @@ These are the real problems we haven't solved yet:
 
 - **1.0-1.2 point quality gap.** Distributed training plateaus above single-GPU. The gap comes from compression loss (~10% of gradient signal per round) and merge staleness (~30s of training against an outdated checkpoint). GPU-accelerated aggregation and delta streaming (more frequent, smaller pushes) are promising directions.
 
-- **Delta size vs quality tradeoff.** Raw deltas give the best quality but are large (300MB for 125M, ~14GB for 7B). Top-k compression reduces size but loses signal. Low-rank compression doesn't work for pre-training (deltas are full-rank). The system auto-adapts compression to bandwidth, but residential internet users will always get worse quality than datacenter nodes.
+- **Delta size vs quality tradeoff.** Raw deltas give the best quality but are large (300MB for 125M, ~14GB for 7B). Top-k compression reduces size but loses signal. Low-rank compression is implemented (`core/model/src/lowrank.rs`) but gives 88-98% reconstruction error on pre-training deltas — it may work better on fine-tuning or late-training deltas where changes are more structured. The system auto-adapts compression to bandwidth, but residential internet users will always get worse quality than datacenter nodes.
 
 - **Only validated at small scale.** 125M parameters, 3 nodes. The protocol is designed for 7B+ models with 50-1000 nodes, but staleness handling, merge quality, and coordinator throughput at that scale are untested.
 
@@ -175,10 +175,10 @@ These are the real problems we haven't solved yet:
 
 - **Scale to 7B with MoE.** Expert sharding across nodes — each node holds one expert + shared layers. Most parameters never cross the network. DiPaCo-style document routing.
 - **Higher-frequency pushing.** The bandwidth-adaptive H_mini already supports pushing every 5-10 steps (set `MIN_INNER_STEPS=5`). Needs GPU aggregation on the coordinator to absorb the higher merge rate.
-- **GPU aggregation.** Move weighted averaging to GPU (burn tensors). Reduce merge time from 30s to <1s, enabling higher-frequency checkpoints.
-- **Shard rotation.** Background rotation of training data shards to increase diversity without blocking the GPU. Currently shards are fixed per node.
-- **Desktop app.** The Tauri shell exists. A one-click "contribute to training" app for non-technical users.
-- **Browser training.** WebAssembly node exists. Train in a browser tab. Currently limited by WebGPU maturity.
+- **GPU aggregation deployment.** The coordinator already implements weighted averaging via burn tensors (CUDA when built with `--features cuda`). Experiments used CPU (NdArray) due to infrastructure constraints. Deploying with CUDA should reduce merge time from 30s to <1s.
+- **Background shard rotation.** Shard assignment per checkpoint version is implemented (`compute_shard_assignment(node_id, version)`), but currently disabled to avoid GPU idle during reload. Needs background download while training continues.
+- **Desktop app.** Tauri shell with training commands exists (`node/desktop/`). Needs UI polish and packaging for non-technical users.
+- **Browser training.** WebAssembly node compiles and runs (`node/browser/wasm/`). Limited by WebGPU maturity and WASM performance.
 
 ## Contributing
 
