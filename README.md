@@ -1,19 +1,19 @@
 # Distrain
 
-Asynchronous distributed LLM training with zero synchronization.
+Asynchronous distributed LLM training with zero synchronization. A research prototype exploring whether volunteer computing can train language models.
 
 Multiple GPUs train the same model without coordination. Each device trains locally, pushes weight updates to a coordinator, and the coordinator merges them. No AllReduce, no synchronous rounds, no waiting for the slowest node. A datacenter GPU and a gaming PC participate in the same training run — each auto-configures and contributes proportionally.
 
 Written entirely in Rust. Single binary, no Python runtime, no PyTorch. Runs on CUDA, Metal, Vulkan, and CPU.
 
-**Long-term vision:** volunteer computing for AI training, like SETI@home. We're not there yet — current bandwidth and memory requirements limit practical participation to devices with dedicated GPUs and decent network connections. But the protocol is designed for that future.
+> **Status: Research preview.** The protocol works and the code runs, but this is not production software. We're looking for collaborators to test on larger models, more nodes, and real-world network conditions. See [Contributing](#contributing) below.
 
 ## Results
 
-We systematically measured the overhead of distributed vs single-GPU training on a 125M parameter transformer across seven experiment curves:
+We trained a 125M parameter transformer across seven experiment curves, measuring the gap between distributed and single-GPU training:
 
-| Curve | Hardware | Plateau Loss | Gap to BL | Key Change |
-|-------|----------|-------------|-----------|------------|
+| Curve | Hardware | Plateau Loss | Gap to Baseline | Key Change |
+|-------|----------|-------------|-----------------|------------|
 | Baseline (A) | 1× RTX 4000 Ada | 4.8 | — | Single GPU, batch=4, lr=3e-4 |
 | B | 3× Mac (2 GPU + 1 CPU) | 6.7 | +1.9 | First distributed, heterogeneous consumer hardware |
 | C | 3× mixed RTX | 6.4 | +1.6 | Outer LR→1.0, compression tuning |
@@ -22,17 +22,14 @@ We systematically measured the overhead of distributed vs single-GPU training on
 | H | 3× A40 | 5.98 | +1.2 | Clean comparison: same hyperparams as baseline |
 | G | 3× A40 | 6.4 | +1.6 | Loss-based lr (decays as model converges) |
 
-Validation loss on held-out data matches training loss within 0.4% across all curves, confirming no overfitting at <2% data utilization.
+Validation loss on held-out data matches training loss within 0.4% across all curves, confirming no overfitting.
 
 **Key findings:**
 
-- **The gap is 1.0-1.2 points** between distributed (3 nodes) and single-GPU baseline. This comes from compression loss (~10% signal per round) and checkpoint merge staleness (~30s of stale training per checkpoint).
-
-- **More contributors = better quality.** 3-contribution checkpoints consistently outperform 2-contribution ones. The weighted average of diverse gradients from multiple nodes improves merge quality.
-
-- **Constant lr matches baseline best.** Loss-based lr scheduling plateaus 0.4 points higher than constant lr. The decay reduces learning rate before the model has fully converged.
-
-- **Consumer hardware works.** Curve B trained across a 10× throughput gap (Apple Silicon GPUs + Intel CPU) for 2,928 checkpoints. The protocol handles heterogeneous devices transparently.
+- **The gap is 1.0-1.2 points** between distributed (3 nodes) and single-GPU baseline. This comes from compression loss (~10% signal per round) and checkpoint merge staleness (~30s per merge on CPU).
+- **More contributors = better quality.** 3-contribution checkpoints consistently outperform 2-contribution ones.
+- **Consumer hardware works.** Curve B trained across a 10× throughput gap (Apple Silicon GPUs + Intel CPU) for 2,928 checkpoints.
+- **Compression is tunable.** Top-k retention ranges from 1% (tiny deltas, more signal loss) to 99% (near-raw, best quality). The system auto-selects based on measured upload bandwidth. On fast connections, it sends near-raw deltas for maximum quality.
 
 ## The protocol
 
@@ -58,13 +55,6 @@ Stale deltas get exponentially less weight: `0.9^staleness`. The merge is commut
 | Contribution weight | Tokens processed × staleness decay |
 | Min contributions | Auto-computed from active node count |
 
-## Current limitations
-
-- **Delta size.** Raw deltas for 125M model: ~400MB. For 7B: ~14GB. Heavy compression reduces this but loses signal. Low-rank decomposition (planned) could achieve 20-200x compression with minimal signal loss.
-- **Memory.** Training 7B requires 20-40GB VRAM minimum. Most consumer devices can't participate at meaningful model sizes.
-- **Scale.** Tested with 3 GPUs. The protocol is designed for 50-1000+ nodes but hasn't been validated at that scale.
-- **Single coordinator.** Current architecture has one coordinator. Peer-to-peer topology is a natural extension.
-
 ## Model presets
 
 Training a different model size is just an environment variable:
@@ -77,9 +67,7 @@ Training a different model size is just an environment variable:
 | `medium` | 7B | 4096 | 32 | 32 | 8 | 11008 | ~80 GB |
 | `large` | 13B | 5120 | 40 | 40 | 8 | 13824 | ~160 GB |
 
-Set `PRESET=small` on the coordinator to bootstrap a 1B model. Nodes auto-detect the architecture from the checkpoint — no configuration needed on their side.
-
-All presets use the Mistral v0.3 tokenizer (32,768 vocab).
+Set `PRESET=small` on the coordinator to bootstrap a 1B model. Nodes auto-detect the architecture from the checkpoint — no configuration needed.
 
 ## Running it
 
@@ -115,12 +103,7 @@ python3 /scripts/prepare_data.py fineweb-edu-10bt \
   --s3-secret-key yoursecret
 ```
 
-This downloads FineWeb-Edu from HuggingFace (~10B tokens), tokenizes it with batch encoding (~1 hour), and uploads 1,102 shards to MinIO. The data is stored on the persistent volume — you only need to do this once.
-
-Available datasets:
-- `fineweb-edu-10bt` — 10B tokens, good for 125M-1B models
-- `fineweb-edu-100bt` — 100B tokens, for 7B+ models
-- `test` — random test shards (no download, instant)
+This downloads FineWeb-Edu from HuggingFace (~10B tokens), tokenizes it (~1 hour), and uploads 1,102 shards to MinIO. You only need to do this once.
 
 **Step 3: Start training nodes**
 
@@ -134,7 +117,7 @@ docker run --gpus all \
   ghcr.io/frane/distrain/node-cuda:latest
 ```
 
-Each node auto-detects its GPU, computes optimal batch size from VRAM and model architecture, scales learning rate accordingly, and starts training immediately. No manual configuration. Start as many nodes as you want — the protocol handles heterogeneous hardware automatically.
+Each node auto-detects its GPU, computes optimal batch size, and starts training immediately. Start as many nodes as you want.
 
 ### Local development
 
@@ -148,7 +131,7 @@ docker compose -f docker/docker-compose.yml up -d minio
 pip install datasets tokenizers numpy tqdm
 python scripts/prepare_data.py fineweb-edu-10bt --output-dir data/fineweb --upload
 
-# Bootstrap a model (change --preset for different sizes)
+# Bootstrap a model
 ./target/release/distrain-node bootstrap --config node.toml --preset tiny
 
 # Run coordinator
@@ -172,6 +155,43 @@ scripts/            Data prep, eval, post-training
 docker/             Local dev stack (MinIO, Prometheus, Grafana)
 ```
 
+## Open questions and known limitations
+
+These are the real problems we haven't solved yet:
+
+- **1.0-1.2 point quality gap.** Distributed training plateaus above single-GPU. The gap comes from compression loss (~10% of gradient signal per round) and merge staleness (~30s of training against an outdated checkpoint). GPU-accelerated aggregation and delta streaming (more frequent, smaller pushes) are promising directions.
+
+- **Delta size vs quality tradeoff.** Raw deltas give the best quality but are large (300MB for 125M, ~14GB for 7B). Top-k compression reduces size but loses signal. Low-rank compression doesn't work for pre-training (deltas are full-rank). The system auto-adapts compression to bandwidth, but residential internet users will always get worse quality than datacenter nodes.
+
+- **Only validated at small scale.** 125M parameters, 3 nodes. The protocol is designed for 7B+ models with 50-1000 nodes, but staleness handling, merge quality, and coordinator throughput at that scale are untested.
+
+- **Single coordinator.** One server handles all merges. It's stateless (all data in S3) and can be restarted, but it's a single point of failure. Peer-to-peer topology is a natural extension.
+
+- **No security.** No authentication on delta pushes. Anyone who finds the coordinator can submit garbage. Real deployment needs signed contributions and verification.
+
+- **Coordinator persistence is fragile.** MinIO data on a Docker volume works but isn't robust. A cloud-native deployment with proper S3 (R2, AWS) would be more reliable.
+
+## Future directions
+
+- **Scale to 7B with MoE.** Expert sharding across nodes — each node holds one expert + shared layers. Most parameters never cross the network. DiPaCo-style document routing.
+- **Delta streaming.** Push every 5-10 steps instead of 50. Smaller deltas, less staleness, fresher gradients. Requires fast coordinator merge (<1s).
+- **GPU aggregation.** Move weighted averaging to GPU (burn tensors). Reduce merge time from 30s to <1s, enabling higher-frequency checkpoints.
+- **Shard rotation.** Background rotation of training data shards to increase diversity without blocking the GPU. Currently shards are fixed per node.
+- **Desktop app.** The Tauri shell exists. A one-click "contribute to training" app for non-technical users.
+- **Browser training.** WebAssembly node exists. Train in a browser tab. Currently limited by WebGPU maturity.
+
+## Contributing
+
+We're looking for people to help with:
+
+- **Run experiments on consumer GPUs.** We've tested on A40s and Macs. What happens with RTX 3060s, 4070s, mixed AMD/NVIDIA clusters? How does residential internet affect quality?
+- **Scale testing.** 10, 50, 100 nodes. Does the protocol hold? Where does the coordinator bottleneck?
+- **Bigger models.** 1B and 7B training runs. Do the same optimizations (constant lr, batch=4, high retention) work at scale?
+- **Compression research.** Better ways to shrink deltas without losing signal. Structured sparsity, learned compression, hybrid approaches.
+- **Infrastructure hardening.** Better persistence, fault tolerance, authentication.
+
+If you're interested, open an issue or reach out. The codebase is ~15K lines of Rust, well-structured, with Docker images that just work.
+
 ## Related work
 
 - [DiLoCo](https://arxiv.org/abs/2311.08105) (Google, 2023) — inner-outer optimization, requires synchronous outer steps
@@ -179,7 +199,7 @@ docker/             Local dev stack (MinIO, Prometheus, Grafana)
 - [Psyche](https://nousresearch.com/nous-psyche/) (Nous Research) — decentralized training, requires synchronization
 - [Hivemind](https://github.com/learning-at-home/hivemind) (Together.ai) — PyTorch library for decentralized training
 
-Distrain's contribution: fully asynchronous merge with zero synchronization, auto-tuning for heterogeneous hardware, and systematic measurement of the distributed-vs-single gap.
+Distrain's contribution: fully asynchronous merge with zero synchronization, pure Rust single-binary implementation, auto-tuning for heterogeneous hardware, and systematic measurement of the distributed-vs-single gap.
 
 ## License
 
