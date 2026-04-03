@@ -10,24 +10,29 @@ Written entirely in Rust. Single binary, no Python runtime, no PyTorch. Runs on 
 
 ## Results
 
-We systematically measured the overhead of distributed vs single-GPU training on a 125M parameter transformer, optimizing one variable at a time across six experiment curves:
+We systematically measured the overhead of distributed vs single-GPU training on a 125M parameter transformer across seven experiment curves:
 
-| Curve | Plateau Loss | Gap to Baseline | Key Change |
-|-------|-------------|-----------------|------------|
-| Baseline (A) | 4.8 | — | Single GPU, no protocol overhead |
-| B | 6.7 | +1.9 | First distributed attempt |
-| C | 6.4 | +1.6 | Outer LR tuning, compression tuning |
-| D | 6.0 | +1.2 | Patience triggers, all nodes contributing |
-| E | 5.8 | +1.0 | Continuous training (GPU never idles) |
-| F | ~6.4 (running) | +1.6 | Auto-tuning, raw deltas, LR scaling |
+| Curve | Hardware | Plateau Loss | Gap to BL | Key Change |
+|-------|----------|-------------|-----------|------------|
+| Baseline (A) | 1× RTX 4000 Ada | 4.8 | — | Single GPU, batch=4, lr=3e-4 |
+| B | 3× Mac (2 GPU + 1 CPU) | 6.7 | +1.9 | First distributed, heterogeneous consumer hardware |
+| C | 3× mixed RTX | 6.4 | +1.6 | Outer LR→1.0, compression tuning |
+| D | 3× RTX A4000 | 6.0 | +1.2 | Patience triggers, all nodes contributing |
+| E | 3× A40 | 5.8 | +1.0 | Continuous training (GPU never idles) |
+| H | 3× A40 | 5.98 | +1.2 | Clean comparison: same hyperparams as baseline |
+| G | 3× A40 | 6.4 | +1.6 | Loss-based lr (decays as model converges) |
+
+Validation loss on held-out data matches training loss within 0.4% across all curves, confirming no overfitting at <2% data utilization.
 
 **Key findings:**
 
-- **Compression is the bottleneck.** Curves B-E progressively reduced compression loss, closing the gap from 1.9 to 1.0 points. When compression is nearly eliminated (Curve F, 92-99% retention), the distributed system converges 2x faster than baseline in the first 2M tokens — because 3 nodes see 3x more diverse data.
+- **The gap is 1.0-1.2 points** between distributed (3 nodes) and single-GPU baseline. This comes from compression loss (~10% signal per round) and checkpoint merge staleness (~30s of stale training per checkpoint).
 
-- **But raw deltas are huge.** A 125M model delta is 300-460MB per push. For 7B, that would be 14GB. This is fine for datacenter networks (8-10s upload) but impractical for residential internet. The protocol adapts automatically — each node compresses based on its measured bandwidth — but heavy compression loses signal.
+- **More contributors = better quality.** 3-contribution checkpoints consistently outperform 2-contribution ones. The weighted average of diverse gradients from multiple nodes improves merge quality.
 
-- **The remaining gap** (~1.0-1.6 points above baseline) comes from: cosine LR restarting per round (fixed for next curve), compression loss on non-datacenter connections, and the overhead of checkpoint merging (25-35s on CPU).
+- **Constant lr matches baseline best.** Loss-based lr scheduling plateaus 0.4 points higher than constant lr. The decay reduces learning rate before the model has fully converged.
+
+- **Consumer hardware works.** Curve B trained across a 10× throughput gap (Apple Silicon GPUs + Intel CPU) for 2,928 checkpoints. The protocol handles heterogeneous devices transparently.
 
 ## The protocol
 
