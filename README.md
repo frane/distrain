@@ -23,7 +23,9 @@ We trained a 125M parameter transformer across six experiment curves, measuring 
 
 We also validated on heterogeneous consumer hardware: two Apple Silicon laptops and one Intel CPU trained together for 2,928 checkpoints despite a 10× throughput gap, reaching loss 6.7.
 
-Validation loss on held-out data matches training loss within 0.4% across all curves, confirming no overfitting.
+![Loss curves](loss_curves.png)
+
+Validation loss on held-out data matches training loss within 0.4%, confirming training loss is a reliable proxy for generalization at this data utilization level (<2%).
 
 **Key findings:**
 
