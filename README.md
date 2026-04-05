@@ -1,10 +1,10 @@
 # Distrain
 
-Asynchronous distributed LLM training with zero synchronization. A research prototype exploring whether volunteer computing can train language models.
+Asynchronous distributed LLM training with zero synchronization. Like SETI@home turned idle computers into a radio telescope, Distrain turns idle GPUs and CPUs into an AI training cluster.
 
-Multiple GPUs train the same model without coordination. Each device trains locally, pushes weight updates to a coordinator, and the coordinator merges them. No AllReduce, no synchronous rounds, no waiting for the slowest node. A datacenter GPU and a gaming PC participate in the same training run — each auto-configures and contributes proportionally.
+Multiple GPUs train the same model without coordination. Each device trains locally, pushes weight updates to a coordinator, and the coordinator merges them. No AllReduce, no synchronous rounds, no waiting for the slowest node. A datacenter GPU and a gaming PC participate in the same training run. Each auto-configures and contributes proportionally.
 
-Written entirely in Rust using the [Burn](https://github.com/tracel-ai/burn) deep learning framework. Single binary, no Python runtime, no PyTorch. The same source code compiles to CUDA, Metal, Vulkan, and CPU — download one ~20 MB file and start training.
+Written entirely in Rust using the [Burn](https://github.com/tracel-ai/burn) deep learning framework. Single binary, no Python runtime, no PyTorch. The same source code compiles to CUDA, Metal, Vulkan, and CPU. Download one ~20 MB file and start training.
 
 > **Status: Research preview.** The protocol works and the code runs, but this is not production software. We're looking for collaborators to test on larger models, more nodes, and real-world network conditions. See [Contributing](#contributing) below.
 
@@ -43,9 +43,9 @@ Validation loss on held-out data matches training loss within 0.4%, confirming t
 Each node:
 1. Downloads the latest checkpoint
 2. Trains continuously (GPU never idles between rounds)
-3. Compresses the delta based on measured upload bandwidth — raw if it fits, top-k sparsification + zstd if not. Error feedback accumulates dropped values so they re-enter future pushes (resets at checkpoint boundaries).
+3. Compresses the delta based on measured upload bandwidth. Raw if the connection is fast, top-k sparsification + zstd if not. Error feedback accumulates dropped values so they re-enter future pushes (resets at checkpoint boundaries).
 4. Uploads to object storage, notifies the coordinator
-5. Coordinator merges deltas with staleness-weighted averaging (outer LR = 1.0)
+5. Coordinator merges deltas with staleness-weighted averaging (merged delta applied directly, no scaling)
 6. New checkpoint produced, training continues without pause
 
 Stale deltas get exponentially less weight: `0.9^staleness`. The merge is commutative within each accumulation window.
@@ -74,7 +74,7 @@ Training a different model size is just an environment variable:
 | `medium` | 7B | 4096 | 32 | 32 | 8 | 11008 | ~80 GB |
 | `large` | 13B | 5120 | 40 | 40 | 8 | 13824 | ~160 GB |
 
-Set `PRESET=small` on the coordinator to bootstrap a 1B model. Nodes auto-detect the architecture from the checkpoint — no configuration needed.
+Set `PRESET=small` on the coordinator to bootstrap a 1B model. Nodes auto-detect the architecture from the checkpoint.
 
 ## Running it
 
@@ -230,7 +230,7 @@ These are the real problems we haven't solved yet:
 
 - **1.0-1.2 point quality gap.** Distributed training plateaus above single-GPU. The gap comes from compression loss (~10% of gradient signal per round) and merge staleness (~30s of training against an outdated checkpoint). GPU-accelerated aggregation and delta streaming (more frequent, smaller pushes) are promising directions.
 
-- **Delta size vs quality tradeoff.** Raw deltas give the best quality but are large (300MB for 125M, ~14GB for 7B). Top-k compression reduces size but loses signal. Low-rank compression is implemented (`core/model/src/lowrank.rs`) but gives 88-98% reconstruction error on pre-training deltas — it may work better on fine-tuning or late-training deltas where changes are more structured. The system auto-adapts compression to bandwidth, but residential internet users will always get worse quality than datacenter nodes.
+- **Delta size vs quality tradeoff.** Raw deltas give the best quality but are large (300MB for 125M, ~14GB for 7B). Top-k compression reduces size but loses signal. Low-rank compression (SVD) was tested and fails for pre-training deltas (88-98% reconstruction error; pre-training deltas are full-rank, unlike fine-tuning). The system auto-adapts compression to bandwidth, but residential internet users will always get worse quality than datacenter nodes.
 
 - **Only validated at small scale.** 125M parameters, 3 nodes. The protocol is designed for 7B+ models with 50-1000 nodes, but staleness handling, merge quality, and coordinator throughput at that scale are untested.
 
@@ -242,12 +242,13 @@ These are the real problems we haven't solved yet:
 
 ## Future directions
 
-- **Scale to 7B with MoE.** Expert sharding across nodes — each node holds one expert + shared layers. Most parameters never cross the network. DiPaCo-style document routing.
-- **Higher-frequency pushing.** The bandwidth-adaptive H_mini already supports pushing every 5-10 steps (set `MIN_INNER_STEPS=5`). Needs GPU aggregation on the coordinator to absorb the higher merge rate.
-- **GPU aggregation deployment.** The coordinator already implements weighted averaging via burn tensors (CUDA when built with `--features cuda`). Experiments used CPU (NdArray) due to infrastructure constraints. Deploying with CUDA should reduce merge time from 30s to <1s.
-- **Background shard rotation.** Shard assignment per checkpoint version is implemented (`compute_shard_assignment(node_id, version)`), but currently disabled to avoid GPU idle during reload. Needs background download while training continues.
-- **Desktop app.** Tauri shell with training commands exists (`node/desktop/`). Needs UI polish and packaging for non-technical users.
-- **Browser training.** WebAssembly node compiles and runs (`node/browser/wasm/`). Limited by WebGPU maturity and WASM performance.
+- **Staleness recovery.** Currently stale deltas get down-weighted or discarded. Delta rebasing (subtracting accumulated model drift before merging) could preserve the novel gradient signal from slow nodes. For extremely stale contributions, proxy replay (fast node retrains on slow node's data selection) recovers data coverage without parameter staleness.
+- **Structured compression.** Current top-k selects individual values. Block sparsity (selecting entire rows/blocks by aggregate norm) would reduce index overhead and preserve gradient coherence. Combined with importance-weighted selection, this could improve both compression ratio and quality.
+- **Scale validation.** Public volunteer campaign to test beyond 3 nodes. How does the convergence gap change with node count? Where does the coordinator bottleneck?
+- **1B clean experiment.** Matched single-GPU baseline for the 1B model, addressing the main experimental gap.
+- **GPU aggregation.** Coordinator implements weighted averaging via Burn tensors (CUDA when built with `--features cuda`). Experiments used CPU. GPU aggregation should reduce merge time from 30s to <1s.
+- **Desktop app.** Tauri shell exists (`node/desktop/`). Needs UI polish for non-technical users.
+- **Browser training.** WebAssembly node compiles (`node/browser/wasm/`). Limited by WebGPU maturity.
 
 ## Contributing
 
@@ -264,11 +265,11 @@ If you're interested, open an issue or reach out. The codebase is ~15K lines of 
 ## Related work
 
 - [DiLoCo](https://arxiv.org/abs/2311.08105) (Google, 2023) — inner-outer optimization, requires synchronous outer steps
-- [INTELLECT-1](https://www.primeintellect.ai/blog/intellect-1) (Prime Intellect) — 10B across continents, synchronous
-- [Psyche](https://nousresearch.com/nous-psyche/) (Nous Research) — decentralized training, requires synchronization
+- [OpenDiLoCo / INTELLECT-1](https://www.primeintellect.ai/blog/intellect-1) (Prime Intellect) — 10B across continents, synchronous outer steps
+- [DeMo / DisTrO](https://arxiv.org/abs/2411.19870) (Nous Research) — 857× bandwidth reduction via decoupled momentum, retains synchronous all-reduce
 - [Hivemind](https://github.com/learning-at-home/hivemind) (Together.ai) — PyTorch library for decentralized training
 
-Distrain's contribution: fully asynchronous merge with zero synchronization, pure Rust single-binary implementation, auto-tuning for heterogeneous hardware, and systematic measurement of the distributed-vs-single gap.
+Distrain's differentiator: fully asynchronous merge with zero synchronization barriers, single Rust binary with no Python/PyTorch dependency, zero-configuration auto-calibration for heterogeneous hardware.
 
 ## License
 
