@@ -264,12 +264,12 @@ If you're interested, open an issue or reach out. The codebase is ~15K lines of 
 
 ## Related work
 
-- [DiLoCo](https://arxiv.org/abs/2311.08105) (Google, 2023) — inner-outer optimization, requires synchronous outer steps
-- [OpenDiLoCo / INTELLECT-1](https://www.primeintellect.ai/blog/intellect-1) (Prime Intellect) — 10B across continents, synchronous outer steps
-- [DeMo / DisTrO](https://arxiv.org/abs/2411.19870) (Nous Research) — 857× bandwidth reduction via decoupled momentum, retains synchronous all-reduce
-- [Hivemind](https://github.com/learning-at-home/hivemind) (Together.ai) — PyTorch library for decentralized training
+- [DiLoCo](https://arxiv.org/abs/2311.08105) (Google, 2023). Inner-outer optimization, requires synchronous outer steps.
+- [OpenDiLoCo / INTELLECT-1](https://www.primeintellect.ai/blog/intellect-1) (Prime Intellect). 10B across continents, synchronous outer steps.
+- [DeMo / DisTrO](https://arxiv.org/abs/2411.19870) (Nous Research). 857× bandwidth reduction via decoupled momentum, retains synchronous all-reduce.
+- [Hivemind](https://github.com/learning-at-home/hivemind) (Together.ai). PyTorch library for decentralized training.
 
-Distrain's differentiator: fully asynchronous merge with zero synchronization barriers, single Rust binary with no Python/PyTorch dependency, zero-configuration auto-calibration for heterogeneous hardware.
+Distrain is the only system that eliminates synchronization entirely. Nodes push independently, no agreement step. Single Rust binary, no Python, zero-configuration.
 
 ## License
 
