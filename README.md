@@ -271,6 +271,20 @@ If you're interested, open an issue or reach out. The codebase is ~15K lines of 
 
 Distrain is the only system that eliminates synchronization entirely. Nodes push independently, no agreement step. Single Rust binary, no Python, zero-configuration.
 
+## Paper
+
+The full paper is included in this repository as [`paper.pdf`](paper.pdf).
+It is not yet on arXiv. If you reference this work, please cite as:
+
+```bibtex
+@unpublished{bandov2026distrain,
+  title  = {Distrain: Asynchronous Weighted-Contribution Training of Language Models Across Heterogeneous Devices},
+  author = {Bandov, Frane},
+  year   = {2026},
+  note   = {Manuscript. \url{https://github.com/frane/distrain/blob/main/paper.pdf}},
+}
+```
+
 ## License
 
 MIT
