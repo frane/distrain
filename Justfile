@@ -7,6 +7,8 @@ default:
 # ── Core ──────────────────────────────────────
 test:
     cargo test --workspace --exclude distrain-wasm
+test-integration:
+    ./scripts/integration_test.sh
 test-wasm:
     cargo check -p distrain-wasm --target wasm32-unknown-unknown
 lint:
