@@ -3377,6 +3377,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wgpu",
+ "zstd 0.13.3",
 ]
 
 [[package]]

@@ -673,3 +673,145 @@ fn decompress_delta_bytes(data: &[u8]) -> Result<HashMap<String, Vec<f32>>> {
         .or_else(|_| distrain_model::compression::decompress_delta_json(data))
         .context("Failed to decompress delta (tried zstd and raw JSON, both block and unstructured)")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rebase_reduces_stale_delta_norm() {
+        // Simulate: model moved from old→current, node trained against old
+        let mut old_checkpoint = HashMap::new();
+        old_checkpoint.insert("w".to_string(), vec![1.0f32; 100]);
+
+        let mut current_checkpoint = HashMap::new();
+        // Model drifted by +0.5 on every param
+        current_checkpoint.insert("w".to_string(), vec![1.5f32; 100]);
+
+        // Delta includes both novel signal AND redundant drift
+        // Node trained: old_params + delta → learned some of the same drift
+        let mut delta = HashMap::new();
+        delta.insert("w".to_string(), vec![0.8f32; 100]); // 0.5 drift + 0.3 novel signal
+
+        let norm_before: f64 = delta["w"].iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+
+        rebase_delta(&mut delta, &old_checkpoint, &current_checkpoint, 0.5);
+
+        let norm_after: f64 = delta["w"].iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+
+        // Rebasing should reduce norm (removed half the drift)
+        assert!(
+            norm_after < norm_before,
+            "Rebasing should reduce delta norm: {norm_before:.4} → {norm_after:.4}"
+        );
+
+        // Rebased delta should be ~0.55 per element (0.8 - 0.5*0.5)
+        let expected = 0.8 - 0.5 * 0.5; // 0.55
+        assert!(
+            (delta["w"][0] - expected).abs() < 1e-6,
+            "Expected {expected}, got {}",
+            delta["w"][0]
+        );
+    }
+
+    #[test]
+    fn test_rebase_preserves_novel_signal() {
+        let mut old = HashMap::new();
+        old.insert("w".to_string(), vec![0.0f32; 50]);
+
+        let mut current = HashMap::new();
+        current.insert("w".to_string(), vec![1.0f32; 50]);
+
+        // Delta that's pure novel signal (orthogonal to drift direction)
+        let mut delta = HashMap::new();
+        let novel: Vec<f32> = (0..50).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        delta.insert("w".to_string(), novel);
+
+        let values_before = delta["w"].clone();
+        rebase_delta(&mut delta, &old, &current, 0.5);
+
+        // After rebasing: delta[i] = original[i] - 0.5 * (1.0 - 0.0) = original[i] - 0.5
+        // Signal is shifted but NOT zeroed out
+        let norm: f64 = delta["w"].iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+        assert!(norm > 0.0, "Rebased delta should not be zero");
+    }
+
+    #[test]
+    fn test_rebase_with_zero_coefficient_is_noop() {
+        let old = HashMap::from([("w".to_string(), vec![0.0f32; 10])]);
+        let current = HashMap::from([("w".to_string(), vec![1.0f32; 10])]);
+        let mut delta = HashMap::from([("w".to_string(), vec![0.5f32; 10])]);
+
+        let before = delta["w"].clone();
+        rebase_delta(&mut delta, &old, &current, 0.0);
+
+        assert_eq!(delta["w"], before, "coefficient=0 should not change delta");
+    }
+
+    #[test]
+    fn test_checkpoint_delta_roundtrip() {
+        // Simulate two checkpoints and verify delta apply reconstructs the new one
+        let old_params: HashMap<String, Vec<f32>> = HashMap::from([
+            ("w".to_string(), vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+            ("b".to_string(), vec![0.1, 0.2]),
+        ]);
+        let new_params: HashMap<String, Vec<f32>> = HashMap::from([
+            ("w".to_string(), vec![1.1, 2.3, 2.8, 4.5, 5.2]),
+            ("b".to_string(), vec![0.15, 0.18]),
+        ]);
+
+        // Compute delta
+        let mut delta: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, new_vals) in &new_params {
+            if let Some(old_vals) = old_params.get(name) {
+                let d: Vec<f32> = new_vals.iter().zip(old_vals.iter()).map(|(n, o)| n - o).collect();
+                delta.insert(name.clone(), d);
+            }
+        }
+
+        // Apply delta to old → should get new
+        let mut reconstructed = old_params.clone();
+        for (name, dv) in &delta {
+            if let Some(pv) = reconstructed.get_mut(name) {
+                for (p, d) in pv.iter_mut().zip(dv.iter()) {
+                    *p += d;
+                }
+            }
+        }
+
+        // Verify reconstruction matches new params within float tolerance
+        for (name, expected) in &new_params {
+            let actual = &reconstructed[name];
+            for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+                assert!(
+                    (e - a).abs() < 1e-6,
+                    "Mismatch in {name}[{i}]: expected {e}, got {a}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_weighted_average_gpu_basic() {
+        let d1 = HashMap::from([("w".to_string(), vec![1.0f32, 2.0, 3.0])]);
+        let d2 = HashMap::from([("w".to_string(), vec![4.0f32, 5.0, 6.0])]);
+        let deltas = vec![(d1, 1.0), (d2, 1.0)]; // equal weight
+
+        let avg = weighted_average_gpu(&deltas).unwrap();
+        // Equal weights → simple average
+        assert!((avg["w"][0] - 2.5).abs() < 1e-5);
+        assert!((avg["w"][1] - 3.5).abs() < 1e-5);
+        assert!((avg["w"][2] - 4.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_weighted_average_gpu_unequal() {
+        let d1 = HashMap::from([("w".to_string(), vec![0.0f32; 3])]);
+        let d2 = HashMap::from([("w".to_string(), vec![10.0f32; 3])]);
+        let deltas = vec![(d1, 1.0), (d2, 3.0)]; // d2 has 3x weight
+
+        let avg = weighted_average_gpu(&deltas).unwrap();
+        // weighted: (0*0.25 + 10*0.75) = 7.5
+        assert!((avg["w"][0] - 7.5).abs() < 1e-4);
+    }
+}

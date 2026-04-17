@@ -625,33 +625,61 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             }
         }
 
-        // Download checkpoint if not cached (retry on network errors)
+        // Download checkpoint if not cached — try delta first, fall back to full
         let ckpt_path = cache_dir.join(format!("v{version}_model.safetensors"));
         if !ckpt_path.exists() {
-            let mut download_ok = false;
-            for attempt in 1..=3 {
-                info!("Downloading checkpoint v{version} (attempt {attempt}/3)...");
-                match storage
-                    .download_to_file(&ckpt_info.checkpoint_key, &ckpt_path)
-                    .await
-                {
-                    Ok(_) => {
-                        download_ok = true;
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("Download failed: {e:#}");
-                        let _ = tokio::fs::remove_file(&ckpt_path).await;
-                        if attempt < 3 {
-                            info!("Retrying in 5s...");
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let mut downloaded = false;
+
+            // Try incremental delta download if previous checkpoint is cached
+            if let (Some(ref delta_key), Some(from_v)) = (&ckpt_info.delta_key, ckpt_info.delta_from_version) {
+                let prev_path = cache_dir.join(format!("v{from_v}_model.safetensors"));
+                if prev_path.exists() {
+                    info!("Trying incremental download v{from_v}→v{version}...");
+                    if let Ok(delta_bytes) = storage.get(delta_key).await {
+                        if let Ok(delta) = distrain_model::compression::decompress_delta(&delta_bytes) {
+                            if let Ok(mut prev) = distrain_model::checkpoint::load_safetensors_map(&prev_path) {
+                                for (name, dv) in &delta {
+                                    if let Some(pv) = prev.get_mut(name) {
+                                        if pv.len() == dv.len() {
+                                            for (p, d) in pv.iter_mut().zip(dv.iter()) { *p += d; }
+                                        }
+                                    }
+                                }
+                                if let Ok(shapes) = distrain_model::checkpoint::load_safetensors_shapes(&prev_path) {
+                                    if let Ok(bytes) = distrain_model::checkpoint::save_state_dict_safetensors_bytes(&prev, &shapes) {
+                                        if tokio::fs::write(&ckpt_path, &bytes).await.is_ok() {
+                                            info!("Incremental download: {:.1}MB delta (vs {:.1}MB full)",
+                                                delta_bytes.len() as f64 / 1e6, bytes.len() as f64 / 1e6);
+                                            downloaded = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-            if !download_ok {
-                warn!("Failed to download checkpoint v{version} after 3 attempts, retrying loop");
-                continue;
+
+            // Fall back to full download
+            if !downloaded {
+                let mut download_ok = false;
+                for attempt in 1..=3 {
+                    info!("Downloading full checkpoint v{version} (attempt {attempt}/3)...");
+                    match storage.download_to_file(&ckpt_info.checkpoint_key, &ckpt_path).await {
+                        Ok(_) => { download_ok = true; break; }
+                        Err(e) => {
+                            warn!("Download failed: {e:#}");
+                            let _ = tokio::fs::remove_file(&ckpt_path).await;
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            }
+                        }
+                    }
+                }
+                if !download_ok {
+                    warn!("Failed to download checkpoint v{version} after 3 attempts, retrying loop");
+                    continue;
+                }
             }
         }
 

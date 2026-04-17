@@ -11,3 +11,5 @@ pub mod trainer;
 
 #[cfg(test)]
 mod data_tests;
+#[cfg(test)]
+mod trainer_tests;

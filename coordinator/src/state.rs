@@ -339,3 +339,154 @@ pub async fn save_state_to_r2(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use distrain_shared::types::*;
+
+    #[test]
+    fn test_apply_delta_push_computes_weight_at_ingest() {
+        let mut acc = AccumulatorState {
+            checkpoint_version: 5,
+            contributions: Vec::new(),
+            first_contribution_at: None,
+            version: 0,
+        };
+
+        let push = DeltaPush {
+            node_id: NodeId("node_a".to_string()),
+            seq_num: 1,
+            checkpoint_version: 3, // staleness = 5-3 = 2
+            inner_steps: 50,
+            delta_key: "deltas/v3/node_a_1.delta.zst".to_string(),
+            training_loss: 10.0,
+            tokens_processed: 1000,
+            training_time_secs: 60.0,
+            compressed_bytes: None,
+            dense_norm: None,
+            sparse_norm: None,
+            shard_ids: None,
+        };
+
+        let (accepted, _, _) = apply_delta_push(&mut acc, &push, 0.9, 10);
+        assert!(accepted);
+        assert_eq!(acc.contributions.len(), 1);
+
+        // Weight should be frozen at ingest: 1000 * 0.9^2 = 810
+        let weight = acc.contributions[0].weight;
+        let expected = 1000.0 * 0.9f64.powi(2);
+        assert!(
+            (weight - expected).abs() < 1e-6,
+            "Weight {weight} != expected {expected} (tokens * decay^staleness)"
+        );
+    }
+
+    #[test]
+    fn test_apply_delta_push_rejects_too_stale() {
+        let mut acc = AccumulatorState {
+            checkpoint_version: 20,
+            contributions: Vec::new(),
+            first_contribution_at: None,
+            version: 0,
+        };
+
+        let push = DeltaPush {
+            node_id: NodeId("node_a".to_string()),
+            seq_num: 1,
+            checkpoint_version: 5, // staleness = 15 > max_staleness=10
+            inner_steps: 50,
+            delta_key: "k".to_string(),
+            training_loss: 10.0,
+            tokens_processed: 1000,
+            training_time_secs: 60.0,
+            compressed_bytes: None,
+            dense_norm: None,
+            sparse_norm: None,
+            shard_ids: None,
+        };
+
+        let (accepted, reason, _) = apply_delta_push(&mut acc, &push, 0.9, 10);
+        assert!(!accepted);
+        assert!(reason.unwrap().contains("Too stale"));
+    }
+
+    #[test]
+    fn test_apply_delta_push_dedup_same_node() {
+        let mut acc = AccumulatorState {
+            checkpoint_version: 5,
+            contributions: Vec::new(),
+            first_contribution_at: None,
+            version: 0,
+        };
+
+        let push1 = DeltaPush {
+            node_id: NodeId("node_a".to_string()),
+            seq_num: 1,
+            checkpoint_version: 5,
+            inner_steps: 50,
+            delta_key: "k1".to_string(),
+            training_loss: 10.0,
+            tokens_processed: 1000,
+            training_time_secs: 60.0,
+            compressed_bytes: None,
+            dense_norm: None,
+            sparse_norm: None,
+            shard_ids: None,
+        };
+        let (accepted, _, _) = apply_delta_push(&mut acc, &push1, 0.9, 10);
+        assert!(accepted);
+        assert_eq!(acc.contributions.len(), 1);
+
+        // Same node, newer seq_num → replaces
+        let push2 = DeltaPush { seq_num: 2, delta_key: "k2".to_string(), ..push1.clone() };
+        let (accepted, _, _) = apply_delta_push(&mut acc, &push2, 0.9, 10);
+        assert!(accepted);
+        assert_eq!(acc.contributions.len(), 1); // replaced, not added
+        assert_eq!(acc.contributions[0].delta_key, "k2");
+
+        // Same node, older seq_num → rejected
+        let push3 = DeltaPush { seq_num: 1, delta_key: "k3".to_string(), ..push1 };
+        let (accepted, reason, _) = apply_delta_push(&mut acc, &push3, 0.9, 10);
+        assert!(!accepted);
+        assert!(reason.unwrap().contains("Duplicate"));
+    }
+
+    #[test]
+    fn test_first_contribution_at_set_once() {
+        let mut acc = AccumulatorState {
+            checkpoint_version: 0,
+            contributions: Vec::new(),
+            first_contribution_at: None,
+            version: 0,
+        };
+
+        let push = DeltaPush {
+            node_id: NodeId("node_a".to_string()),
+            seq_num: 1,
+            checkpoint_version: 0,
+            inner_steps: 10,
+            delta_key: "k".to_string(),
+            training_loss: 10.0,
+            tokens_processed: 100,
+            training_time_secs: 10.0,
+            compressed_bytes: None,
+            dense_norm: None,
+            sparse_norm: None,
+            shard_ids: None,
+        };
+
+        apply_delta_push(&mut acc, &push, 0.9, 10);
+        let first_time = acc.first_contribution_at.unwrap();
+
+        // Second push should NOT reset first_contribution_at
+        let push2 = DeltaPush {
+            node_id: NodeId("node_b".to_string()),
+            seq_num: 1,
+            ..push
+        };
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        apply_delta_push(&mut acc, &push2, 0.9, 10);
+        assert_eq!(acc.first_contribution_at.unwrap(), first_time);
+    }
+}
+

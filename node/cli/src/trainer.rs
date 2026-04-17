@@ -75,6 +75,16 @@ pub fn adaptive_top_k(loss: f64, max_delta_bytes: Option<u64>, raw_param_bytes: 
 ///
 /// Reads `compression_pipeline`, `compression_retention`, `quantization_mode`,
 /// and `use_importance` from NodeConfig. Falls back to defaults for v0.1 compat.
+/// Route compression through the configured pipeline.
+///
+/// Reads all ablation config fields from NodeConfig:
+/// - `compression_pipeline`: "block" (row-level) or "unstructured" (element-level)
+/// - `compression_retention`: fixed fraction override (None = adaptive)
+/// - `quantization_mode`: "int8_block" (per-row), "int8_tensor" (per-tensor), "bf16" (none)
+/// - `use_importance`: importance-weighted row selection (block pipeline only)
+///
+/// When `use_importance=true` and `pipeline=block`, rows are ranked by
+/// importance score (|delta| / running_movement) instead of raw L2 norm.
 pub fn compress_with_config(
     delta: &std::collections::HashMap<String, Vec<f32>>,
     shapes: &std::collections::HashMap<String, Vec<usize>>,
@@ -95,21 +105,157 @@ pub fn compress_with_config(
     let compression_config = CompressionConfig {
         top_k_fraction: top_k,
         quantize_int8,
-        per_tensor_adaptive: pipeline != "block", // block uses row-level, not per-tensor
+        per_tensor_adaptive: pipeline != "block",
         ..CompressionConfig::default()
     };
 
-    // Update importance tracker with this round's delta (before compression)
+    // Update importance tracker with this round's delta
     if let Some(ref mut tracker) = importance {
         tracker.update(delta);
     }
 
     if pipeline == "block" {
-        compress_delta_block(delta, shapes, &compression_config, error_buffer)
+        if config.use_importance {
+            if let Some(ref tracker) = importance {
+                if tracker.num_tensors() > 0 {
+                    // Importance-weighted block sparsity: rank rows by importance score
+                    return compress_delta_block_with_importance(
+                        delta, shapes, &compression_config, error_buffer, tracker,
+                    );
+                }
+            }
+        }
+        if config.quantization_mode == "int8_tensor" {
+            // Block sparsity but with per-tensor quantization (ablation)
+            compress_delta_block_tensor_quant(delta, shapes, &compression_config, error_buffer)
+        } else {
+            // Block sparsity with per-row quantization (default)
+            compress_delta_block(delta, shapes, &compression_config, error_buffer)
+        }
     } else {
         // Unstructured (v0.1 compatible)
         compress_delta(delta, shapes, &compression_config, error_buffer)
     }
+}
+
+/// Block sparsity with importance-weighted row selection.
+fn compress_delta_block_with_importance(
+    delta: &std::collections::HashMap<String, Vec<f32>>,
+    shapes: &std::collections::HashMap<String, Vec<usize>>,
+    config: &CompressionConfig,
+    error_buffer: &mut ErrorBuffer,
+    tracker: &distrain_model::importance::ImportanceTracker,
+) -> Result<(Vec<u8>, CompressionStats)> {
+    use distrain_model::compression::*;
+
+    // Step 1: Error feedback
+    let delta_with_error = error_buffer.apply(delta);
+    let dense_norm = delta_with_error.values()
+        .flat_map(|v| v.iter()).map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    let num_params_total: usize = delta_with_error.values().map(|v| v.len()).sum();
+    let raw_param_bytes = (num_params_total * 4) as u64;
+
+    // Step 2: Importance-weighted block sparsification
+    let row_imp = tracker.compute_row_importance(&delta_with_error, shapes);
+    let (row_indices, values, sparse) = sparsify_block_importance(
+        &delta_with_error, shapes, config.top_k_fraction, &row_imp,
+    );
+    error_buffer.update(&delta_with_error, &sparse);
+    let sparse_norm = sparse.values()
+        .flat_map(|v| v.iter()).map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    let num_params_kept: usize = sparse.values()
+        .flat_map(|v| v.iter()).filter(|x| **x != 0.0).count();
+
+    // Step 3: Per-row INT8 quantization
+    let (final_values, row_scales) = if config.quantize_int8 {
+        let (q, s) = quantize_values_int8_per_row(&values, shapes, &row_indices);
+        let deq = dequantize_values_int8_per_row(&q, &s, shapes, &row_indices);
+        (deq, Some(s))
+    } else {
+        (values, None)
+    };
+
+    let block_delta = BlockSparseDelta {
+        row_indices,
+        values: final_values,
+        shapes: shapes.clone(),
+        row_scales,
+        config: config.clone(),
+        format: "block_v1".to_string(),
+    };
+
+    let json_bytes = serde_json::to_vec(&block_delta)
+        .context("Failed to serialize block sparse delta")?;
+    let compressed = zstd::encode_all(json_bytes.as_slice(), config.zstd_level)
+        .context("zstd compression failed")?;
+    let compressed_bytes = compressed.len() as u64;
+
+    let retention_ratio = if dense_norm > 0.0 { sparse_norm / dense_norm } else { 0.0 };
+    Ok((compressed, CompressionStats {
+        dense_norm, sparse_norm, retention_ratio,
+        top_k_fraction: config.top_k_fraction,
+        num_params_total, num_params_kept,
+        compressed_bytes,
+        raw_param_bytes,
+    }))
+}
+
+/// Block sparsity with per-tensor quantization (for ablation comparison).
+fn compress_delta_block_tensor_quant(
+    delta: &std::collections::HashMap<String, Vec<f32>>,
+    shapes: &std::collections::HashMap<String, Vec<usize>>,
+    config: &CompressionConfig,
+    error_buffer: &mut ErrorBuffer,
+) -> Result<(Vec<u8>, CompressionStats)> {
+    use distrain_model::compression::*;
+
+    let delta_with_error = error_buffer.apply(delta);
+    let dense_norm = delta_with_error.values()
+        .flat_map(|v| v.iter()).map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    let num_params_total: usize = delta_with_error.values().map(|v| v.len()).sum();
+    let raw_param_bytes = (num_params_total * 4) as u64;
+
+    let (row_indices, values, sparse) = sparsify_block(
+        &delta_with_error, shapes, config.top_k_fraction,
+    );
+    error_buffer.update(&delta_with_error, &sparse);
+    let sparse_norm = sparse.values()
+        .flat_map(|v| v.iter()).map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    let num_params_kept: usize = sparse.values()
+        .flat_map(|v| v.iter()).filter(|x| **x != 0.0).count();
+
+    // Per-tensor quantization (not per-row)
+    let (final_values, scales) = if config.quantize_int8 {
+        let (q, s) = quantize_values_int8(&values);
+        let deq = dequantize_values_int8(&q, &s);
+        (deq, Some(s))
+    } else {
+        (values, None)
+    };
+
+    let block_delta = BlockSparseDelta {
+        row_indices,
+        values: final_values,
+        shapes: shapes.clone(),
+        row_scales: scales.map(|s| s.into_iter().map(|(k, v)| (k, vec![v])).collect()),
+        config: config.clone(),
+        format: "block_v1".to_string(),
+    };
+
+    let json_bytes = serde_json::to_vec(&block_delta)
+        .context("Failed to serialize block sparse delta")?;
+    let compressed = zstd::encode_all(json_bytes.as_slice(), config.zstd_level)
+        .context("zstd compression failed")?;
+    let compressed_bytes = compressed.len() as u64;
+
+    let retention_ratio = if dense_norm > 0.0 { sparse_norm / dense_norm } else { 0.0 };
+    Ok((compressed, CompressionStats {
+        dense_norm, sparse_norm, retention_ratio,
+        top_k_fraction: config.top_k_fraction,
+        num_params_total, num_params_kept,
+        compressed_bytes,
+        raw_param_bytes,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
