@@ -5,6 +5,7 @@ pub mod client;
 pub mod continuous;
 pub mod data;
 pub mod resources;
+pub mod resume;
 pub mod trainer;
 
 #[cfg(test)]

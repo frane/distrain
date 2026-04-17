@@ -450,6 +450,19 @@ impl StreamingDataLoader {
         self.shard_names.len()
     }
 
+    /// Current shard index within the loaded shards (for resume state).
+    pub fn current_shard_index(&self) -> usize {
+        if self.loaded.is_empty() {
+            return 0;
+        }
+        self.loaded.get(self.current_idx).map(|(idx, _)| *idx).unwrap_or(0)
+    }
+
+    /// Current token offset within the current shard (for resume state).
+    pub fn current_token_offset(&self) -> usize {
+        self.offset
+    }
+
     /// Extract loaded shard data as a map from shard filename to tokens.
     /// Used to pass pre-loaded data to a new loader on checkpoint change.
     pub fn take_loaded_shards(&mut self) -> HashMap<String, Vec<u16>> {

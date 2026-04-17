@@ -385,6 +385,27 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     let mut measured_upload_bps: Option<f64> = None;
     // Persistent error buffer for compression error feedback across rounds.
     let mut error_buffer = distrain_model::compression::ErrorBuffer::new();
+
+    // Try to resume from saved state
+    if let Ok(Some(saved_state)) = distrain_node::resume::NodeState::load(&cache_dir) {
+        info!(
+            "Resuming from saved state: v{}, seq={}, node={}",
+            saved_state.last_checkpoint_version, saved_state.seq_num, saved_state.node_id,
+        );
+        seq_num = saved_state.seq_num;
+        if node_id.is_empty() {
+            node_id = saved_state.node_id;
+        }
+    }
+    // Try to load saved error buffer
+    match distrain_node::resume::load_error_buffer(&cache_dir) {
+        Ok(Some(eb)) => {
+            info!("Resumed error buffer ({} tensors)", eb.buffer.len());
+            error_buffer = eb;
+        }
+        Ok(None) => {}
+        Err(e) => warn!("Failed to load error buffer (starting fresh): {e}"),
+    }
     // Last round's elapsed time (for poll delay estimation).
     let mut _result_elapsed: f64 = 0.0;
     // Auto-calibrated batch size and gradient accumulation steps.
@@ -891,6 +912,24 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
 
         last_trained_version = Some(version);
         _result_elapsed = result.elapsed_secs;
+
+        // Save node state to disk (resume point after crash/restart)
+        {
+            let node_state = distrain_node::resume::NodeState {
+                last_checkpoint_version: version,
+                seq_num,
+                shard_index: streaming_loader.current_shard_index(),
+                shard_offset: streaming_loader.current_token_offset(),
+                node_id: node_id.clone(),
+                saved_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Err(e) = node_state.save(&cache_dir) {
+                warn!("Failed to save node state: {e}");
+            }
+            if let Err(e) = distrain_node::resume::save_error_buffer(&error_buffer, &cache_dir) {
+                warn!("Failed to save error buffer: {e}");
+            }
+        }
 
         // Pipeline: evict consumed shards and download next ones while we handle the result.
         // This ensures fresh shard data is ready for the next round.
