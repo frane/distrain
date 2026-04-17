@@ -245,6 +245,73 @@ async fn build_config_from_coordinator(url: &str) -> Result<NodeConfig> {
 }
 
 async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
+    // Determine operating mode: P2P with DHT discovery or direct HTTP
+    let mut operating_mode = distrain_shared::p2p::types::OperatingMode::DirectHttp;
+    let p2p_handle: Option<distrain_shared::p2p::service::P2pHandle>;
+
+    if config.p2p.enabled {
+        match distrain_shared::p2p::service::start_p2p_service(&config.p2p).await {
+            Ok((handle, mut event_rx)) => {
+                info!("P2P service started: peer_id={}", handle.local_peer_id);
+
+                // Try DHT coordinator discovery
+                if let Err(e) = handle.lookup_coordinator().await {
+                    warn!("DHT coordinator lookup failed: {e}");
+                }
+
+                // Wait briefly for DHT response
+                let discovered_url = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    async {
+                        while let Some(event) = event_rx.recv().await {
+                            if let distrain_shared::p2p::service::P2pEvent::CoordinatorDiscovered { addresses, .. } = event {
+                                if let Some(addr) = addresses.first() {
+                                    return Some(addr.clone());
+                                }
+                            }
+                        }
+                        None
+                    }
+                ).await.unwrap_or(None);
+
+                if let Some(url) = discovered_url {
+                    info!("Discovered coordinator via DHT: {url}");
+                    config.coordinator_url = url;
+                    operating_mode = distrain_shared::p2p::types::OperatingMode::SingleCoordinatorWithDht;
+                } else {
+                    info!("DHT discovery timed out — falling back to configured URL: {}", config.coordinator_url);
+                }
+
+                // Spawn background event handler for gossip checkpoint announcements
+                tokio::spawn(async move {
+                    while let Some(event) = event_rx.recv().await {
+                        match event {
+                            distrain_shared::p2p::service::P2pEvent::CheckpointAnnounced(ann) => {
+                                info!("P2P: new checkpoint v{} announced via gossip (loss={:.2})", ann.version, ann.loss);
+                                // The main training loop will pick this up via heartbeat/polling
+                                // TODO: interrupt current training round immediately
+                            }
+                            distrain_shared::p2p::service::P2pEvent::PeerConnected(peer) => {
+                                info!("P2P: peer connected: {}", &peer[..12.min(peer.len())]);
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+
+                p2p_handle = Some(handle);
+            }
+            Err(e) => {
+                warn!("Failed to start P2P service: {e}. Running in direct HTTP mode.");
+                p2p_handle = None;
+            }
+        }
+    } else {
+        p2p_handle = None;
+    }
+    let _ = &p2p_handle; // suppress unused warning until peer merge is implemented
+    info!("Operating mode: {operating_mode}");
+
     let coordinator = client::CoordinatorClient::new(&config.coordinator_url);
     let storage = Storage::new(&config.storage).await?;
 

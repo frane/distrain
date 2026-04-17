@@ -12,7 +12,7 @@ default = []
 cuda = ["distrain-model/cuda", "dep:burn-cuda"]
 
 [dependencies]
-distrain-shared = { path = "../core/shared" }
+distrain-shared = { path = "../core/shared", features = ["p2p"] }
 distrain-model = { path = "../core/model" }
 burn = { workspace = true }
 burn-ndarray = { workspace = true }

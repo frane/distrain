@@ -37,6 +37,8 @@ pub struct AppState {
     pub accumulator: RwLock<AccumulatorState>,
     /// In-memory coordinator persistent state. Flushed to R2 periodically.
     pub coord_state: RwLock<CoordinatorPersistentState>,
+    /// P2P service handle (if P2P is enabled). Used to broadcast checkpoint announcements.
+    pub p2p: Option<distrain_shared::p2p::service::P2pHandle>,
 }
 
 #[tokio::main]
@@ -67,12 +69,52 @@ async fn main() -> Result<()> {
     let accumulator = recovered.accumulator;
     let coord_state = recovered.coord_state;
 
+    // Start P2P service if enabled
+    let p2p_handle = if config.p2p.enabled {
+        match distrain_shared::p2p::service::start_p2p_service(&config.p2p).await {
+            Ok((handle, mut event_rx)) => {
+                info!("P2P service started: peer_id={}", handle.local_peer_id);
+                // Register as coordinator on DHT
+                let http_addr = format!("http://{}:{}", config.host, config.port);
+                if let Err(e) = handle.register_coordinator(http_addr).await {
+                    warn!("Failed to register on DHT: {e}");
+                }
+                // Spawn event handler (logs events for now)
+                tokio::spawn(async move {
+                    while let Some(event) = event_rx.recv().await {
+                        match event {
+                            distrain_shared::p2p::service::P2pEvent::PeerConnected(peer) => {
+                                info!("P2P: peer connected: {}", &peer[..12.min(peer.len())]);
+                            }
+                            distrain_shared::p2p::service::P2pEvent::PeerDisconnected(peer) => {
+                                info!("P2P: peer disconnected: {}", &peer[..12.min(peer.len())]);
+                            }
+                            distrain_shared::p2p::service::P2pEvent::CoordinatorSync(msg) => {
+                                info!("P2P: coordinator sync from {} (v{})", msg.coordinator_id, msg.checkpoint_version);
+                                // TODO: implement multi-coordinator merge (item 10.3)
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                Some(handle)
+            }
+            Err(e) => {
+                warn!("Failed to start P2P service: {e}. Running in direct HTTP mode.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let app_state = Arc::new(AppState {
         storage,
         config: config.clone(),
         aggregation_in_progress: AtomicBool::new(false),
         accumulator: RwLock::new(accumulator),
         coord_state: RwLock::new(coord_state),
+        p2p: p2p_handle,
     });
 
     // Spawn background task to persist state to R2 every 30 seconds

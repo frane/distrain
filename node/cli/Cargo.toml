@@ -16,7 +16,7 @@ default = []
 cuda = ["distrain-model/cuda"]
 
 [dependencies]
-distrain-shared = { path = "../../core/shared" }
+distrain-shared = { path = "../../core/shared", features = ["p2p"] }
 distrain-model = { path = "../../core/model" }
 burn = { workspace = true, features = ["autodiff"] }
 burn-wgpu = { workspace = true, features = ["std", "autotune", "fusion"] }

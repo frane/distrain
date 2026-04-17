@@ -395,6 +395,25 @@ async fn push_delta(
                         {
                             warn!("Post-aggregation flush failed: {e}");
                         }
+
+                        // Broadcast checkpoint via P2P gossip (if enabled)
+                        if let Some(ref p2p) = agg_flag.p2p {
+                            let announcement = distrain_shared::p2p::types::CheckpointAnnouncement {
+                                version: new_version,
+                                r2_path: distrain_shared::paths::checkpoint_path(new_version),
+                                delta_path: Some(distrain_shared::paths::checkpoint_delta_path(
+                                    new_version, new_version - 1,
+                                )),
+                                loss: cs_snap.total_tokens_trained as f64, // placeholder
+                                total_tokens: cs_snap.total_tokens_trained,
+                                timestamp: chrono::Utc::now(),
+                                produced_by: p2p.local_peer_id.clone(),
+                                num_contributions: acc_snapshot.contributions.len() as u64,
+                            };
+                            if let Err(e) = p2p.announce_checkpoint(announcement).await {
+                                warn!("P2P checkpoint broadcast failed: {e}");
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!("Aggregation failed: {e}");

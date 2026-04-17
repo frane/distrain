@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::p2p::types::P2pConfig;
 use crate::types::TrainingParams;
 
 /// R2/S3-compatible storage configuration.
@@ -65,6 +66,10 @@ pub struct CoordinatorConfig {
     /// How much drift to subtract (0.0-1.0). 0.5 = conservative, 1.0 = full.
     #[serde(default = "default_rebasing_coefficient")]
     pub rebasing_coefficient: f64,
+
+    /// P2P networking configuration (DHT + gossip).
+    #[serde(default)]
+    pub p2p: P2pConfig,
 }
 
 impl Default for CoordinatorConfig {
@@ -86,6 +91,7 @@ impl Default for CoordinatorConfig {
             enable_rebasing: default_enable_rebasing(),
             rebasing_threshold: default_rebasing_threshold(),
             rebasing_coefficient: default_rebasing_coefficient(),
+            p2p: P2pConfig::default(),
         }
     }
 }
@@ -137,6 +143,10 @@ pub struct NodeConfig {
     /// Enable importance-weighted selection for top-k/block.
     #[serde(default)]
     pub use_importance: bool,
+
+    /// P2P networking configuration (DHT + gossip).
+    #[serde(default)]
+    pub p2p: P2pConfig,
 }
 
 fn default_min_weight() -> f64 {
@@ -173,6 +183,7 @@ impl Default for NodeConfig {
             compression_retention: None,
             quantization_mode: default_quantization_mode(),
             use_importance: false,
+            p2p: P2pConfig::default(),
         }
     }
 }
