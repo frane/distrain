@@ -166,6 +166,98 @@ pub fn load_error_buffer(
     Ok(Some(distrain_model::compression::ErrorBuffer { buffer }))
 }
 
+/// Save importance tracker to a binary file (same format as error buffer).
+pub fn save_importance_tracker(
+    tracker: &distrain_model::importance::ImportanceTracker,
+    cache_dir: &Path,
+) -> Result<()> {
+    let path = cache_dir.join("importance_tracker.bin");
+    let mut data = Vec::new();
+
+    // Magic bytes + version
+    data.extend_from_slice(b"DRIT"); // Distrain Importance Tracker
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&tracker.alpha.to_le_bytes());
+
+    let num_tensors = tracker.running_movement.len() as u32;
+    data.extend_from_slice(&num_tensors.to_le_bytes());
+
+    for (name, values) in &tracker.running_movement {
+        let name_bytes = name.as_bytes();
+        data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(name_bytes);
+        data.extend_from_slice(&(values.len() as u32).to_le_bytes());
+        for v in values {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+
+    std::fs::write(&path, &data).context("Failed to write importance tracker")?;
+    let size_mb = data.len() as f64 / (1024.0 * 1024.0);
+    info!("Saved importance tracker: {:.1} MB ({num_tensors} tensors)", size_mb);
+    Ok(())
+}
+
+/// Load importance tracker from a binary file.
+pub fn load_importance_tracker(
+    cache_dir: &Path,
+) -> Result<Option<distrain_model::importance::ImportanceTracker>> {
+    let path = cache_dir.join("importance_tracker.bin");
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let data = std::fs::read(&path).context("Failed to read importance tracker")?;
+    if data.len() < 16 {
+        warn!("Importance tracker file too small, ignoring");
+        return Ok(None);
+    }
+
+    if &data[0..4] != b"DRIT" {
+        warn!("Importance tracker file has wrong magic, ignoring");
+        return Ok(None);
+    }
+
+    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    if version != 1 {
+        warn!("Importance tracker format version {version} not supported");
+        return Ok(None);
+    }
+
+    let alpha = f32::from_le_bytes(data[8..12].try_into().unwrap());
+    let num_tensors = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+    let mut offset = 16;
+    let mut running_movement = HashMap::new();
+
+    for _ in 0..num_tensors {
+        if offset + 4 > data.len() { return Ok(None); }
+        let name_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        if offset + name_len > data.len() { return Ok(None); }
+        let name = String::from_utf8_lossy(&data[offset..offset + name_len]).to_string();
+        offset += name_len;
+        if offset + 4 > data.len() { return Ok(None); }
+        let count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        let values_bytes = count * 4;
+        if offset + values_bytes > data.len() { return Ok(None); }
+        let values: Vec<f32> = (0..count)
+            .map(|i| {
+                let start = offset + i * 4;
+                f32::from_le_bytes(data[start..start + 4].try_into().unwrap())
+            })
+            .collect();
+        offset += values_bytes;
+        running_movement.insert(name, values);
+    }
+
+    info!("Loaded importance tracker: {} tensors, alpha={alpha}", running_movement.len());
+    Ok(Some(distrain_model::importance::ImportanceTracker {
+        running_movement,
+        alpha,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +311,22 @@ mod tests {
     fn test_load_missing_error_buffer() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_error_buffer(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_importance_tracker_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracker = distrain_model::importance::ImportanceTracker::new(0.85);
+        let mut delta = HashMap::new();
+        delta.insert("weight".to_string(), vec![1.0, 2.0, 3.0]);
+        tracker.update(&delta);
+
+        save_importance_tracker(&tracker, dir.path()).unwrap();
+        let loaded = load_importance_tracker(dir.path()).unwrap().unwrap();
+
+        assert_eq!(loaded.alpha, 0.85);
+        assert_eq!(loaded.running_movement["weight"].len(), 3);
+        // After one update with alpha=0.85: m = 0.85*0 + 0.15*|d| = 0.15*d
+        assert!((loaded.running_movement["weight"][0] - 0.15).abs() < 1e-5);
     }
 }

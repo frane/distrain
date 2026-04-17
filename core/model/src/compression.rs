@@ -492,14 +492,16 @@ pub struct BlockSparseDelta {
 /// Row-level block sparsification for 2D tensors.
 ///
 /// For each 2D tensor (weight matrix):
-///   - Compute L2 norm per row
-///   - Keep top k% of rows by norm
+///   - Compute L2 norm per row (or use importance scores if provided)
+///   - Keep top k% of rows by score
 ///   - Return selected rows with their indices
 ///
 /// For 1D tensors (bias, layer norm):
 ///   - Fall back to standard unstructured top-k
 ///
-/// Error buffer operates at the row level for 2D tensors.
+/// If `importance` is provided, row selection uses importance scores instead
+/// of raw L2 norm. Importance = |delta| / running_movement, favoring params
+/// that moved more than usual.
 pub fn sparsify_block(
     delta: &HashMap<String, Vec<f32>>,
     shapes: &HashMap<String, Vec<usize>>,
@@ -571,6 +573,98 @@ pub fn sparsify_block(
         }
 
         // Build sparse reconstruction
+        let mut sparse = vec![0.0f32; flat.len()];
+        for &r in &selected_rows {
+            let start = r * cols;
+            let end = start + cols;
+            sparse[start..end].copy_from_slice(&flat[start..end]);
+        }
+
+        let indices: Vec<u32> = selected_rows.iter().map(|&r| r as u32).collect();
+        all_row_indices.insert(name.clone(), indices);
+        all_values.insert(name.clone(), values);
+        all_sparse.insert(name.clone(), sparse);
+    }
+
+    (all_row_indices, all_values, all_sparse)
+}
+
+/// Block sparsification with importance-weighted row selection.
+///
+/// Same as `sparsify_block`, but rows are ranked by importance score (mean per-row
+/// importance from `ImportanceTracker`) instead of raw L2 norm.
+pub fn sparsify_block_importance(
+    delta: &HashMap<String, Vec<f32>>,
+    shapes: &HashMap<String, Vec<usize>>,
+    k_fraction: f32,
+    row_importance: &HashMap<String, Vec<f32>>,
+) -> (
+    HashMap<String, Vec<u32>>,
+    HashMap<String, Vec<f32>>,
+    HashMap<String, Vec<f32>>,
+) {
+    let mut all_row_indices = HashMap::new();
+    let mut all_values = HashMap::new();
+    let mut all_sparse = HashMap::new();
+
+    for (name, flat) in delta {
+        let shape = match shapes.get(name) {
+            Some(s) => s,
+            None => {
+                let k = ((flat.len() as f32 * k_fraction).ceil() as usize).max(1);
+                let (sparse, indices, values) = unstructured_topk_single(flat, k);
+                all_row_indices.insert(name.clone(), indices);
+                all_values.insert(name.clone(), values);
+                all_sparse.insert(name.clone(), sparse);
+                continue;
+            }
+        };
+
+        if shape.len() != 2 {
+            let k = ((flat.len() as f32 * k_fraction).ceil() as usize).max(1);
+            let (sparse, indices, values) = unstructured_topk_single(flat, k);
+            all_row_indices.insert(name.clone(), indices);
+            all_values.insert(name.clone(), values);
+            all_sparse.insert(name.clone(), sparse);
+            continue;
+        }
+
+        let rows = shape[0];
+        let cols = shape[1];
+        let k_rows = ((rows as f32 * k_fraction).ceil() as usize).max(1).min(rows);
+
+        // Use importance scores for row ranking (fall back to L2 norm if no scores)
+        let mut row_scores: Vec<(usize, f64)> = if let Some(imp) = row_importance.get(name) {
+            (0..rows)
+                .map(|r| (r, if r < imp.len() { imp[r] as f64 } else { 0.0 }))
+                .collect()
+        } else {
+            // Fallback to L2 norm
+            (0..rows)
+                .map(|r| {
+                    let start = r * cols;
+                    let end = start + cols;
+                    let norm = flat[start..end]
+                        .iter()
+                        .map(|x| (*x as f64) * (*x as f64))
+                        .sum::<f64>()
+                        .sqrt();
+                    (r, norm)
+                })
+                .collect()
+        };
+
+        row_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut selected_rows: Vec<usize> = row_scores[..k_rows].iter().map(|(r, _)| *r).collect();
+        selected_rows.sort();
+
+        let mut values = Vec::with_capacity(k_rows * cols);
+        for &r in &selected_rows {
+            let start = r * cols;
+            let end = start + cols;
+            values.extend_from_slice(&flat[start..end]);
+        }
+
         let mut sparse = vec![0.0f32; flat.len()];
         for &r in &selected_rows {
             let start = r * cols;

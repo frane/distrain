@@ -14,6 +14,7 @@ pub mod config;
 pub mod model;
 pub mod checkpoint;
 pub mod compression;
+pub mod importance;
 pub mod lowrank;
 pub mod training;
 
