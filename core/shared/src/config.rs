@@ -123,6 +123,20 @@ pub struct NodeConfig {
     /// Force CPU backend (set via CLI --cpu flag, not from config file)
     #[serde(skip)]
     pub force_cpu: bool,
+
+    // ── Ablation config (v0.2) ──────────────────────────────────
+    /// Compression pipeline: "block" (v0.2 row-level) or "unstructured" (v0.1 element-level).
+    #[serde(default = "default_compression_pipeline")]
+    pub compression_pipeline: String,
+    /// Fixed retention fraction. If set, overrides adaptive top-k.
+    #[serde(default)]
+    pub compression_retention: Option<f32>,
+    /// Quantization mode: "int8_block" (per-row), "int8_tensor" (per-tensor), "bf16" (none).
+    #[serde(default = "default_quantization_mode")]
+    pub quantization_mode: String,
+    /// Enable importance-weighted selection for top-k/block.
+    #[serde(default)]
+    pub use_importance: bool,
 }
 
 fn default_min_weight() -> f64 {
@@ -155,6 +169,13 @@ impl Default for NodeConfig {
             max_memory_fraction: default_max_memory_fraction(),
             force_batch_size: None,
             force_cpu: false,
+            compression_pipeline: default_compression_pipeline(),
+            compression_retention: None,
+            quantization_mode: default_quantization_mode(),
+            use_importance: false,
         }
     }
 }
+
+fn default_compression_pipeline() -> String { "unstructured".to_string() }
+fn default_quantization_mode() -> String { "int8_tensor".to_string() }

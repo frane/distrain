@@ -240,7 +240,7 @@ async fn build_config_from_coordinator(url: &str) -> Result<NodeConfig> {
         training_params: Some(auto_config.training_params),
         max_memory_fraction: 0.80,
         force_batch_size: None,
-        force_cpu: false,
+        ..Default::default()
     })
 }
 
