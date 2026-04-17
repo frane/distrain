@@ -55,6 +55,9 @@ pub struct DeltaPush {
     /// L2 norm of sparse delta after top-k sparsification.
     #[serde(default)]
     pub sparse_norm: Option<f64>,
+    /// Shard IDs this delta was trained on (for proxy replay).
+    #[serde(default)]
+    pub shard_ids: Option<Vec<u32>>,
 }
 
 /// Response to delta push.

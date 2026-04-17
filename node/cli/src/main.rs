@@ -309,8 +309,22 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     } else {
         p2p_handle = None;
     }
-    let _ = &p2p_handle; // suppress unused warning until peer merge is implemented
-    info!("Operating mode: {operating_mode}");
+    // Determine formal operating mode via cascade logic
+    let coordinator_reachable = reqwest::Client::new()
+        .get(format!("{}/health", config.coordinator_url))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .is_ok();
+    operating_mode = distrain_shared::p2p::cascade::determine_operating_mode(
+        &config.p2p,
+        &config.coordinator_url,
+        p2p_handle.is_some(),
+        coordinator_reachable,
+        if p2p_handle.is_some() && operating_mode == distrain_shared::p2p::types::OperatingMode::SingleCoordinatorWithDht { 1 } else { 0 },
+        0, // peer count unknown at startup
+    );
+    let _ = &p2p_handle; // used for mode detection above, and for future peer merge
 
     let coordinator = client::CoordinatorClient::new(&config.coordinator_url);
     let storage = Storage::new(&config.storage).await?;
@@ -673,10 +687,26 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     trainer::GpuVerdict::Available { name, is_integrated, max_buffer_size, vram_mb, .. } => {
                         // Use VRAM if known, else estimate from max_buffer_size (integrated GPUs)
                         gpu_vram_mb = vram_mb.or_else(|| {
-                            // max_buffer_size is in bytes, convert to MiB
-                            // For integrated GPUs, buffer size ≈ usable GPU memory
                             Some(max_buffer_size / (1024 * 1024))
                         });
+
+                        // VRAM cascade: determine training strategy based on available VRAM
+                        if let Some(vram) = gpu_vram_mb {
+                            let (strategy, batch_scale) = resources::determine_vram_strategy(vram, &model_config);
+                            info!("VRAM strategy: {strategy}");
+                            if strategy == resources::VramStrategy::CpuOnly {
+                                info!("VRAM cascade: forcing CPU mode (insufficient VRAM)");
+                                config.force_cpu = true;
+                            } else if batch_scale < 1.0 && user_batch_size.is_none() {
+                                // Scale down initial batch estimate
+                                let scaled = (batch_size as f64 * batch_scale).max(1.0) as usize;
+                                if scaled < batch_size {
+                                    info!("VRAM cascade: scaling batch_size {batch_size} → {scaled} (strategy={strategy})");
+                                    batch_size = scaled;
+                                    effective_batch_size = scaled;
+                                }
+                            }
+                        }
 
                         // Integrated GPU with tiny buffer: skip (e.g., Intel Iris 2GB)
                         // Discrete GPUs and large integrated GPUs: always try, let probe decide.
@@ -1138,6 +1168,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             compressed_bytes: result.compression_stats.as_ref().map(|s| s.compressed_bytes),
             dense_norm: result.compression_stats.as_ref().map(|s| s.dense_norm),
             sparse_norm: result.compression_stats.as_ref().map(|s| s.sparse_norm),
+            shard_ids: None, // CPU loop doesn't track shard IDs in push (TODO)
         };
 
         // Build metrics entry now (captures current values before they change next round)

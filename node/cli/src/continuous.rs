@@ -26,7 +26,7 @@ use tracing::{info, warn, error};
 
 use distrain_model::checkpoint::load_safetensors_map;
 use distrain_model::compression::{
-    compress_delta, CompressionConfig, CompressionStats, ErrorBuffer,
+    compress_delta, compress_delta_block, CompressionConfig, CompressionStats, ErrorBuffer,
 };
 use distrain_model::config::ModelConfig;
 use distrain_model::model::{
@@ -183,6 +183,7 @@ async fn delta_uploader(
     cache_dir: PathBuf,
     measured_bandwidth_bps: Arc<AtomicU64>,
     recommended_h_mini: Arc<AtomicU64>,
+    compression_pipeline: String,
 ) {
     let mut error_buffer = ErrorBuffer::new();
 
@@ -218,9 +219,15 @@ async fn delta_uploader(
             }
         };
 
-        let compressed_bytes = match compress_delta(&pkg.raw_delta, &pkg.shapes, &compression_config, &mut error_buffer) {
+        let compress_result = if compression_pipeline == "block" {
+            compress_delta_block(&pkg.raw_delta, &pkg.shapes, &compression_config, &mut error_buffer)
+        } else {
+            compress_delta(&pkg.raw_delta, &pkg.shapes, &compression_config, &mut error_buffer)
+        };
+        let compressed_bytes = match compress_result {
             Ok((compressed, stats)) => {
-                info!("Compression: retention={:.1}%, {}MB → {}MB",
+                info!("Compression ({}): retention={:.1}%, {}MB → {}MB",
+                    compression_pipeline,
                     stats.retention_ratio * 100.0,
                     stats.raw_param_bytes / (1024*1024),
                     stats.compressed_bytes / (1024*1024));
@@ -365,6 +372,8 @@ pub struct ContinuousTrainingParams {
     pub loss_based_lr: bool,
     /// Shared bandwidth measurement from delta_uploader (bytes/sec).
     pub measured_bandwidth_bps: Arc<AtomicU64>,
+    /// Cache directory for state persistence (resume).
+    pub cache_dir: PathBuf,
 }
 
 /// Tight training loop that runs on a blocking thread via spawn_blocking.
@@ -569,6 +578,21 @@ fn continuous_training_loop(
                 }
             }
 
+            // Save resume state after each completed round
+            {
+                let node_state = crate::resume::NodeState {
+                    last_checkpoint_version: current_version,
+                    seq_num,
+                    shard_index: 0,
+                    shard_offset: 0,
+                    node_id: params.node_id.clone(),
+                    saved_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Err(e) = node_state.save(&params.cache_dir) {
+                    warn!("Failed to save node state: {e}");
+                }
+            }
+
             // Snapshot current params as new round start
             round_start_params = module.extract_state_dict();
             round_step = 0;
@@ -707,6 +731,7 @@ fn build_delta_package(
         compressed_bytes: None,
         dense_norm: None,
         sparse_norm: None,
+        shard_ids: None,
     };
 
     info!("Delta snapshot ready ({}MB raw), sending to uploader for async compression",
@@ -746,10 +771,53 @@ pub async fn run_continuous_training(
     shards_per_node: usize,
     error_buffer: ErrorBuffer,
 ) -> Result<()> {
-    // Persistent state across restarts of the inner loop
+    // Load resume state if available
     let mut seq_num: u64 = 0;
+    if let Ok(Some(saved)) = crate::resume::NodeState::load(&cache_dir) {
+        info!("Resuming continuous training from saved state: v{}, seq={}", saved.last_checkpoint_version, saved.seq_num);
+        seq_num = saved.seq_num;
+    }
     let mut streaming_loader: Option<crate::data::StreamingDataLoader> = None;
     let mut data_loader: Option<crate::data::DataLoader> = None;
+
+    // Graceful shutdown: SIGINT/SIGTERM saves state and exits
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let shutdown_flag = shutdown.clone();
+        let cache_dir_sig = cache_dir.clone();
+        let node_id_sig = node_id.clone();
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            {
+                let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
+                tokio::select! {
+                    _ = ctrl_c => info!("Received SIGINT — saving state and shutting down"),
+                    _ = sigterm.recv() => info!("Received SIGTERM — saving state and shutting down"),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = ctrl_c.await;
+                info!("Received SIGINT — saving state and shutting down");
+            }
+            shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Save minimal state as safety net
+            let state = crate::resume::NodeState {
+                last_checkpoint_version: 0,
+                seq_num: 0,
+                shard_index: 0,
+                shard_offset: 0,
+                node_id: node_id_sig,
+                saved_at: chrono::Utc::now().to_rfc3339(),
+            };
+            let _ = state.save(&cache_dir_sig);
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            warn!("Shutdown timeout — forcing exit");
+            std::process::exit(0);
+        });
+    }
 
     // Shared atomics for bandwidth-adaptive compression and H_mini auto-tune
     let measured_bandwidth_bps = Arc::new(AtomicU64::new(0));
@@ -761,33 +829,74 @@ pub async fn run_continuous_training(
         let version = ckpt_info.version;
         info!("Continuous training: starting from v{version}");
 
-        // Download checkpoint if not cached
+        // Download checkpoint if not cached.
+        // Try incremental delta download first (much smaller), fall back to full.
         let ckpt_path = cache_dir.join(format!("v{version}_model.safetensors"));
         if !ckpt_path.exists() {
-            let mut ok = false;
-            for attempt in 1..=3 {
-                info!("Downloading checkpoint v{version} (attempt {attempt}/3)...");
-                match storage
-                    .download_to_file(&ckpt_info.checkpoint_key, &ckpt_path)
-                    .await
-                {
-                    Ok(_) => {
-                        ok = true;
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("Download failed: {e:#}");
-                        let _ = tokio::fs::remove_file(&ckpt_path).await;
-                        if attempt < 3 {
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let mut downloaded = false;
+
+            // Try delta download if previous checkpoint is cached
+            if let (Some(ref delta_key), Some(from_v)) = (&ckpt_info.delta_key, ckpt_info.delta_from_version) {
+                let prev_path = cache_dir.join(format!("v{from_v}_model.safetensors"));
+                if prev_path.exists() {
+                    info!("Attempting incremental download v{from_v}→v{version} via delta...");
+                    match storage.get(delta_key).await {
+                        Ok(delta_bytes) => {
+                            match distrain_model::compression::decompress_delta(&delta_bytes) {
+                                Ok(delta) => {
+                                    // Apply delta to previous checkpoint
+                                    match distrain_model::checkpoint::load_safetensors_map(&prev_path) {
+                                        Ok(mut prev_params) => {
+                                            for (name, dv) in &delta {
+                                                if let Some(pv) = prev_params.get_mut(name) {
+                                                    if pv.len() == dv.len() {
+                                                        for (p, d) in pv.iter_mut().zip(dv.iter()) {
+                                                            *p += d;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let shapes = distrain_model::checkpoint::load_safetensors_shapes(&prev_path)?;
+                                            let bytes = distrain_model::checkpoint::save_state_dict_safetensors_bytes(&prev_params, &shapes)?;
+                                            tokio::fs::write(&ckpt_path, &bytes).await?;
+                                            let delta_mb = delta_bytes.len() as f64 / (1024.0 * 1024.0);
+                                            let full_mb = bytes.len() as f64 / (1024.0 * 1024.0);
+                                            info!("Incremental download: {delta_mb:.1}MB delta (saved {:.0}% vs {full_mb:.1}MB full)",
+                                                (1.0 - delta_mb / full_mb) * 100.0);
+                                            downloaded = true;
+                                        }
+                                        Err(e) => warn!("Failed to load prev checkpoint for delta apply: {e}"),
+                                    }
+                                }
+                                Err(e) => warn!("Failed to decompress checkpoint delta: {e}"),
+                            }
                         }
+                        Err(e) => info!("Delta not available ({e}), falling back to full download"),
                     }
                 }
             }
-            if !ok {
-                warn!("Failed to download v{version}, retrying...");
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                continue;
+
+            // Fall back to full checkpoint download
+            if !downloaded {
+                let mut ok = false;
+                for attempt in 1..=3 {
+                    info!("Downloading full checkpoint v{version} (attempt {attempt}/3)...");
+                    match storage.download_to_file(&ckpt_info.checkpoint_key, &ckpt_path).await {
+                        Ok(_) => { ok = true; break; }
+                        Err(e) => {
+                            warn!("Download failed: {e:#}");
+                            let _ = tokio::fs::remove_file(&ckpt_path).await;
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            }
+                        }
+                    }
+                }
+                if !ok {
+                    warn!("Failed to download v{version}, retrying...");
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    continue;
+                }
             }
         }
 
@@ -859,6 +968,7 @@ pub async fn run_continuous_training(
         let du_cache_dir = cache_dir.clone();
         let du_bw = measured_bandwidth_bps.clone();
         let du_h_mini = recommended_h_mini.clone();
+        let du_pipeline = config.compression_pipeline.clone();
         let du_handle = tokio::spawn(delta_uploader(
             du_storage,
             du_coordinator,
@@ -866,6 +976,7 @@ pub async fn run_continuous_training(
             du_cache_dir,
             du_bw,
             du_h_mini,
+            du_pipeline,
         ));
 
         // Build training params
@@ -889,6 +1000,7 @@ pub async fn run_continuous_training(
             data_loader: data_loader.take().unwrap(),
             loss_based_lr: std::env::var("LR_MODE").map_or(true, |v| v != "constant"),
             measured_bandwidth_bps: measured_bandwidth_bps.clone(),
+            cache_dir: cache_dir.clone(),
         };
 
         let heartbeat_url = config.coordinator_url.clone();
@@ -954,6 +1066,21 @@ pub async fn run_continuous_training(
                 info!("Skipping warmup for subsequent rounds");
                 tp.warmup_fraction = 0.0;
             }
+        }
+
+        // Check for graceful shutdown
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            info!("Shutdown requested — saving final state and exiting");
+            let state = crate::resume::NodeState {
+                last_checkpoint_version: 0, // unknown here, but seq_num is the key
+                seq_num,
+                shard_index: 0,
+                shard_offset: 0,
+                node_id: node_id.clone(),
+                saved_at: chrono::Utc::now().to_rfc3339(),
+            };
+            let _ = state.save(&cache_dir);
+            return Ok(());
         }
 
         info!("Training loop returned, restarting with latest checkpoint...");

@@ -71,61 +71,23 @@ async fn main() -> Result<()> {
     let coord_state = recovered.coord_state;
 
     // Start P2P service if enabled
-    let p2p_handle = if config.p2p.enabled {
+    let (p2p_handle, p2p_event_rx) = if config.p2p.enabled {
         match distrain_shared::p2p::service::start_p2p_service(&config.p2p).await {
-            Ok((handle, mut event_rx)) => {
+            Ok((handle, event_rx)) => {
                 info!("P2P service started: peer_id={}", handle.local_peer_id);
-                // Register as coordinator on DHT
                 let http_addr = format!("http://{}:{}", config.host, config.port);
                 if let Err(e) = handle.register_coordinator(http_addr).await {
                     warn!("Failed to register on DHT: {e}");
                 }
-                // Spawn event handler for P2P events
-                let storage_for_p2p = storage.clone();
-                tokio::spawn(async move {
-                    while let Some(event) = event_rx.recv().await {
-                        match event {
-                            distrain_shared::p2p::service::P2pEvent::PeerConnected(peer) => {
-                                info!("P2P: peer connected: {}", &peer[..12.min(peer.len())]);
-                            }
-                            distrain_shared::p2p::service::P2pEvent::PeerDisconnected(peer) => {
-                                info!("P2P: peer disconnected: {}", &peer[..12.min(peer.len())]);
-                            }
-                            distrain_shared::p2p::service::P2pEvent::CoordinatorSync(msg) => {
-                                info!("P2P: coordinator sync from {} (v{})", msg.coordinator_id, msg.checkpoint_version);
-                                // Multi-coordinator merge: download remote checkpoint, merge with local
-                                let merge_storage = storage_for_p2p.clone();
-                                let merge_msg = msg.clone();
-                                tokio::spawn(async move {
-                                    // Get current version from R2
-                                    let local_version = match crate::state::load_accumulator(&merge_storage).await {
-                                        Ok(acc) => acc.checkpoint_version,
-                                        Err(_) => 0,
-                                    };
-                                    if merge_msg.checkpoint_version <= local_version {
-                                        return; // remote is not newer, skip
-                                    }
-                                    match crate::peer_sync::merge_remote_checkpoint(
-                                        &merge_storage, local_version, &merge_msg,
-                                    ).await {
-                                        Ok(new_v) => info!("Merged remote checkpoint → v{new_v}"),
-                                        Err(e) => warn!("Remote checkpoint merge failed: {e}"),
-                                    }
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                });
-                Some(handle)
+                (Some(handle), Some(event_rx))
             }
             Err(e) => {
                 warn!("Failed to start P2P service: {e}. Running in direct HTTP mode.");
-                None
+                (None, None)
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     let app_state = Arc::new(AppState {
@@ -152,6 +114,54 @@ async fn main() -> Result<()> {
                     state::save_state_to_r2(&app.storage, &acc_snapshot, &coord_snapshot).await
                 {
                     warn!("Background flush failed: {e}");
+                }
+            }
+        });
+    }
+
+    // Spawn P2P event handler (after app_state is created so we can share it)
+    if let Some(mut event_rx) = p2p_event_rx {
+        let p2p_app = Arc::clone(&app_state);
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    distrain_shared::p2p::service::P2pEvent::PeerConnected(peer) => {
+                        info!("P2P: peer connected: {}", &peer[..12.min(peer.len())]);
+                    }
+                    distrain_shared::p2p::service::P2pEvent::PeerDisconnected(peer) => {
+                        info!("P2P: peer disconnected: {}", &peer[..12.min(peer.len())]);
+                    }
+                    distrain_shared::p2p::service::P2pEvent::CoordinatorSync(msg) => {
+                        info!("P2P: coordinator sync from {} (v{})", msg.coordinator_id, msg.checkpoint_version);
+                        let merge_app = p2p_app.clone();
+                        let merge_msg = msg.clone();
+                        tokio::spawn(async move {
+                            let local_version = merge_app.accumulator.read().await.checkpoint_version;
+                            if merge_msg.checkpoint_version <= local_version {
+                                return;
+                            }
+                            match crate::peer_sync::merge_remote_checkpoint(
+                                &merge_app.storage, local_version, &merge_msg,
+                            ).await {
+                                Ok(new_v) => {
+                                    info!("Merged remote checkpoint → v{new_v}");
+                                    {
+                                        let mut acc = merge_app.accumulator.write().await;
+                                        acc.checkpoint_version = new_v;
+                                        acc.contributions.clear();
+                                        acc.first_contribution_at = None;
+                                        acc.version += 1;
+                                    }
+                                    {
+                                        let mut cs = merge_app.coord_state.write().await;
+                                        cs.total_tokens_trained += merge_msg.total_tokens;
+                                    }
+                                }
+                                Err(e) => warn!("Remote checkpoint merge failed: {e}"),
+                            }
+                        });
+                    }
+                    _ => {}
                 }
             }
         });
