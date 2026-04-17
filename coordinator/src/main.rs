@@ -5,6 +5,7 @@
 
 pub mod aggregation;
 pub mod metrics;
+pub mod peer_sync;
 pub mod proxy_replay;
 mod routes;
 pub mod stats;
@@ -79,7 +80,8 @@ async fn main() -> Result<()> {
                 if let Err(e) = handle.register_coordinator(http_addr).await {
                     warn!("Failed to register on DHT: {e}");
                 }
-                // Spawn event handler (logs events for now)
+                // Spawn event handler for P2P events
+                let storage_for_p2p = storage.clone();
                 tokio::spawn(async move {
                     while let Some(event) = event_rx.recv().await {
                         match event {
@@ -91,7 +93,25 @@ async fn main() -> Result<()> {
                             }
                             distrain_shared::p2p::service::P2pEvent::CoordinatorSync(msg) => {
                                 info!("P2P: coordinator sync from {} (v{})", msg.coordinator_id, msg.checkpoint_version);
-                                // TODO: implement multi-coordinator merge (item 10.3)
+                                // Multi-coordinator merge: download remote checkpoint, merge with local
+                                let merge_storage = storage_for_p2p.clone();
+                                let merge_msg = msg.clone();
+                                tokio::spawn(async move {
+                                    // Get current version from R2
+                                    let local_version = match crate::state::load_accumulator(&merge_storage).await {
+                                        Ok(acc) => acc.checkpoint_version,
+                                        Err(_) => 0,
+                                    };
+                                    if merge_msg.checkpoint_version <= local_version {
+                                        return; // remote is not newer, skip
+                                    }
+                                    match crate::peer_sync::merge_remote_checkpoint(
+                                        &merge_storage, local_version, &merge_msg,
+                                    ).await {
+                                        Ok(new_v) => info!("Merged remote checkpoint → v{new_v}"),
+                                        Err(e) => warn!("Remote checkpoint merge failed: {e}"),
+                                    }
+                                });
                             }
                             _ => {}
                         }

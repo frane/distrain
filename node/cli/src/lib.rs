@@ -4,6 +4,7 @@
 pub mod client;
 pub mod continuous;
 pub mod data;
+pub mod peer_merge;
 pub mod resources;
 pub mod resume;
 pub mod trainer;
