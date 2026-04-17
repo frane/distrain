@@ -85,7 +85,8 @@ pub struct CheckpointInfo {
     pub delta_from_version: Option<u64>,
 }
 
-/// CRDT accumulator state persisted to R2 as JSON.
+/// Delta accumulator state persisted to R2 as JSON.
+/// Deltas commute under weighted averaging — arrival order doesn't affect the result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccumulatorState {
     pub checkpoint_version: u64,

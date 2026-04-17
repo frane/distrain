@@ -78,7 +78,7 @@ enum Commands {
         #[arg(long)]
         seq_len: usize,
     },
-    /// Single-GPU baseline training (no coordinator, no compression, no CRDT)
+    /// Single-GPU baseline training (no coordinator, no compression, no async merge)
     /// For paper comparison: same model, same data, same hyperparameters.
     Baseline {
         /// Path to checkpoint file to start from
