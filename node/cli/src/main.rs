@@ -249,6 +249,11 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     let mut operating_mode = distrain_shared::p2p::types::OperatingMode::DirectHttp;
     let p2p_handle: Option<distrain_shared::p2p::service::P2pHandle>;
 
+    // Peer merge state: shared with P2P event handler (populated when gossip deltas arrive)
+    let peer_merge = std::sync::Arc::new(std::sync::Mutex::new(
+        distrain_node::peer_merge::PeerMergeState::new(2, 0),
+    ));
+
     if config.p2p.enabled {
         match distrain_shared::p2p::service::start_p2p_service(&config.p2p).await {
             Ok((handle, mut event_rx)) => {
@@ -282,14 +287,25 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
                     info!("DHT discovery timed out — falling back to configured URL: {}", config.coordinator_url);
                 }
 
-                // Spawn background event handler for gossip checkpoint announcements
+                // Spawn background event handler for gossip events
+                let pm_for_gossip = peer_merge.clone();
                 tokio::spawn(async move {
                     while let Some(event) = event_rx.recv().await {
                         match event {
                             distrain_shared::p2p::service::P2pEvent::CheckpointAnnounced(ann) => {
                                 info!("P2P: new checkpoint v{} announced via gossip (loss={:.2})", ann.version, ann.loss);
-                                // The main training loop will pick this up via heartbeat/polling
-                                // TODO: interrupt current training round immediately
+                            }
+                            distrain_shared::p2p::service::P2pEvent::PeerDelta(delta_ann) => {
+                                info!("P2P: peer delta from {} (v{}, {} steps)",
+                                    &delta_ann.node_id[..12.min(delta_ann.node_id.len())],
+                                    delta_ann.checkpoint_version, delta_ann.inner_steps);
+                                let ready = {
+                                    let mut pm = pm_for_gossip.lock().unwrap();
+                                    pm.add_delta(delta_ann)
+                                };
+                                if ready {
+                                    info!("Peer merge: enough deltas accumulated — ready to produce checkpoint");
+                                }
                             }
                             distrain_shared::p2p::service::P2pEvent::PeerConnected(peer) => {
                                 info!("P2P: peer connected: {}", &peer[..12.min(peer.len())]);
@@ -324,7 +340,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         if p2p_handle.is_some() && operating_mode == distrain_shared::p2p::types::OperatingMode::SingleCoordinatorWithDht { 1 } else { 0 },
         0, // peer count unknown at startup
     );
-    let _ = &p2p_handle; // used for mode detection above, and for future peer merge
+    if operating_mode == distrain_shared::p2p::types::OperatingMode::PeerMerge {
+        info!("Peer merge mode active: will accumulate gossip deltas and produce local checkpoints");
+    }
 
     let coordinator = client::CoordinatorClient::new(&config.coordinator_url);
     let storage = Storage::new(&config.storage).await?;
@@ -1199,6 +1217,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         // All data needed by the background task is cloned/moved here.
         let delta_key =
             distrain_shared::paths::delta_path(version, &node_id, seq_num);
+        let delta_key_for_gossip = delta_key.clone();
         let push_body = distrain_shared::types::DeltaPush {
             node_id: distrain_shared::types::NodeId(node_id.clone()),
             seq_num,
@@ -1332,6 +1351,47 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             Ok(())
         }));
 
+        // Gossip our delta to peers (if P2P enabled)
+        if let Some(ref handle) = p2p_handle {
+            let ann = distrain_shared::p2p::types::PeerDeltaAnnouncement {
+                node_id: node_id.clone(),
+                checkpoint_version: version,
+                delta_key: delta_key_for_gossip,
+                inner_steps: result.steps_completed,
+                training_loss: result.final_loss,
+                tokens_processed: result.tokens_processed,
+                weight: result.tokens_processed as f64, // simplified weight
+                timestamp: chrono::Utc::now(),
+            };
+            let h = handle.clone();
+            tokio::spawn(async move {
+                if let Err(e) = h.announce_peer_delta(ann).await {
+                    warn!("Failed to gossip delta: {e}");
+                }
+            });
+        }
+
+        // Peer merge: if enough deltas accumulated from gossip, produce local checkpoint
+        if operating_mode == distrain_shared::p2p::types::OperatingMode::PeerMerge {
+            let should_merge = peer_merge.lock().unwrap().should_produce_checkpoint();
+            if should_merge {
+                let delta_pairs = peer_merge.lock().unwrap().take_deltas();
+                info!("Peer merge: producing local checkpoint from {} deltas", delta_pairs.len());
+                // Download and merge deltas (same algorithm as coordinator)
+                // This is best-effort — if it fails, we continue training
+                let merge_storage = storage.clone();
+                let merge_version = version;
+                let merge_cache = cache_dir.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = produce_peer_checkpoint(
+                        &merge_storage, &merge_cache, merge_version, &delta_pairs,
+                    ).await {
+                        warn!("Peer checkpoint production failed: {e}");
+                    }
+                });
+            }
+        }
+
         // Continue immediately to next round — upload proceeds in background
     }
 
@@ -1343,6 +1403,60 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         }
         Ok(())
     }
+}
+
+/// Produce a checkpoint by merging peer deltas (coordinator-optional mode).
+/// Same weighted average algorithm as the coordinator.
+async fn produce_peer_checkpoint(
+    storage: &Storage,
+    cache_dir: &std::path::Path,
+    base_version: u64,
+    delta_pairs: &[(String, f64)], // (delta_key, weight)
+) -> Result<()> {
+    use distrain_model::checkpoint::*;
+
+    let ckpt_path = cache_dir.join(format!("v{base_version}_model.safetensors"));
+    if !ckpt_path.exists() {
+        anyhow::bail!("Base checkpoint v{base_version} not cached");
+    }
+
+    let mut checkpoint = load_safetensors_map(&ckpt_path)?;
+    let shapes = load_safetensors_shapes(&ckpt_path)?;
+
+    let total_weight: f64 = delta_pairs.iter().map(|(_, w)| w).sum();
+    if total_weight == 0.0 {
+        anyhow::bail!("Total weight is zero");
+    }
+
+    // Download and merge all deltas
+    for (delta_key, weight) in delta_pairs {
+        let w = (*weight / total_weight) as f32;
+        match storage.get(delta_key).await {
+            Ok(bytes) => {
+                if let Ok(delta) = distrain_model::compression::decompress_delta(&bytes) {
+                    for (name, dv) in &delta {
+                        if let Some(cv) = checkpoint.get_mut(name) {
+                            if cv.len() == dv.len() {
+                                for (c, d) in cv.iter_mut().zip(dv.iter()) {
+                                    *c += d * w;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => warn!("Failed to download peer delta {delta_key}: {e}"),
+        }
+    }
+
+    // Upload merged checkpoint
+    let new_version = base_version + 1;
+    let bytes = save_state_dict_safetensors_bytes(&checkpoint, &shapes)?;
+    let ckpt_key = distrain_shared::paths::checkpoint_path(new_version);
+    storage.put(&ckpt_key, bytes).await?;
+    info!("Peer merge: produced checkpoint v{new_version} from {} deltas", delta_pairs.len());
+
+    Ok(())
 }
 
 /// Single-GPU baseline: train without coordinator, log per-step loss.

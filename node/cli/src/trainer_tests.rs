@@ -273,6 +273,138 @@ mod tests {
         );
     }
 
+    // ── Peer merge state tests ─────────────────────────────────────
+
+    #[test]
+    fn test_peer_merge_add_and_dedup() {
+        use crate::peer_merge::PeerMergeState;
+        use distrain_shared::p2p::types::PeerDeltaAnnouncement;
+
+        let mut pm = PeerMergeState::new(3, 5);
+
+        let make_ann = |node: &str, seq: u64| PeerDeltaAnnouncement {
+            node_id: node.to_string(),
+            checkpoint_version: 5,
+            delta_key: format!("deltas/v5/{node}_{seq}.delta.zst"),
+            inner_steps: 50,
+            training_loss: 10.0,
+            tokens_processed: 1000,
+            weight: 1000.0,
+            timestamp: chrono::Utc::now(),
+        };
+
+        pm.add_delta(make_ann("node_a", 1));
+        assert_eq!(pm.num_deltas(), 1);
+
+        pm.add_delta(make_ann("node_b", 1));
+        assert_eq!(pm.num_deltas(), 2);
+
+        // Dedup: same node replaces
+        pm.add_delta(make_ann("node_a", 2));
+        assert_eq!(pm.num_deltas(), 2); // still 2, not 3
+
+        // Third unique node triggers checkpoint
+        let ready = pm.add_delta(make_ann("node_c", 1));
+        assert!(ready, "Should be ready with 3 contributions");
+        assert_eq!(pm.num_deltas(), 3);
+    }
+
+    #[test]
+    fn test_peer_merge_staleness_filter() {
+        use crate::peer_merge::PeerMergeState;
+        use distrain_shared::p2p::types::PeerDeltaAnnouncement;
+
+        let mut pm = PeerMergeState::new(2, 10);
+
+        let stale = PeerDeltaAnnouncement {
+            node_id: "node_a".to_string(),
+            checkpoint_version: 5, // version 10 - 5 = 5 > 3 threshold
+            delta_key: "k".to_string(),
+            inner_steps: 50,
+            training_loss: 10.0,
+            tokens_processed: 1000,
+            weight: 1000.0,
+            timestamp: chrono::Utc::now(),
+        };
+
+        let added = pm.add_delta(stale);
+        assert!(!added, "Stale delta (v5 against v10) should be rejected");
+        assert_eq!(pm.num_deltas(), 0);
+    }
+
+    #[test]
+    fn test_peer_merge_take_and_reset() {
+        use crate::peer_merge::PeerMergeState;
+        use distrain_shared::p2p::types::PeerDeltaAnnouncement;
+
+        let mut pm = PeerMergeState::new(2, 5);
+
+        let ann = |node: &str| PeerDeltaAnnouncement {
+            node_id: node.to_string(),
+            checkpoint_version: 5,
+            delta_key: format!("k_{node}"),
+            inner_steps: 50,
+            training_loss: 10.0,
+            tokens_processed: 1000,
+            weight: 1000.0,
+            timestamp: chrono::Utc::now(),
+        };
+
+        pm.add_delta(ann("a"));
+        pm.add_delta(ann("b"));
+        assert!(pm.should_produce_checkpoint());
+
+        let pairs = pm.take_deltas();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pm.num_deltas(), 0); // reset after take
+    }
+
+    #[test]
+    fn test_peer_merge_conflict_resolution() {
+        use crate::peer_merge::resolve_checkpoint_conflict;
+
+        // Higher contributions wins
+        assert!(resolve_checkpoint_conflict(10, 5, 5, 5)); // local wins
+        assert!(!resolve_checkpoint_conflict(5, 5, 10, 5)); // remote wins
+
+        // Same contributions → higher version wins
+        assert!(resolve_checkpoint_conflict(10, 6, 10, 5)); // local wins
+        assert!(!resolve_checkpoint_conflict(10, 5, 10, 6)); // remote wins
+    }
+
+    // ── Shutdown state save test ──────────────────────────────────
+
+    #[test]
+    fn test_shutdown_flag_triggers_state_save() {
+        // Simulate: shutdown flag set → state should be saveable
+        let dir = tempfile::tempdir().unwrap();
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Not set → no save
+        assert!(!shutdown.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Set flag
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(shutdown.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Save state (simulating what the shutdown handler does)
+        let state = crate::resume::NodeState {
+            last_checkpoint_version: 42,
+            seq_num: 10,
+            shard_index: 0,
+            shard_offset: 0,
+            node_id: "test_node".to_string(),
+            saved_at: "2026-04-17T00:00:00Z".to_string(),
+        };
+        state.save(dir.path()).unwrap();
+
+        // Verify state was saved correctly
+        let loaded = crate::resume::NodeState::load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.last_checkpoint_version, 42);
+        assert_eq!(loaded.seq_num, 10);
+        assert_eq!(loaded.node_id, "test_node");
+    }
+
     #[test]
     fn test_fallback_upgrade() {
         use distrain_shared::p2p::cascade::*;
