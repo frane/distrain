@@ -5,7 +5,7 @@ use chrono::Utc;
 use distrain_shared::paths;
 use distrain_shared::storage::Storage;
 use distrain_shared::types::*;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Load the accumulator state from R2, or create a new empty one.
 pub async fn load_accumulator(storage: &Storage) -> Result<AccumulatorState> {
@@ -269,5 +269,73 @@ pub async fn load_coordinator_state(storage: &Storage) -> CoordinatorPersistentS
         .get_json(&paths::coordinator_state_path())
         .await
         .unwrap_or_default()
+}
+
+/// Recovered coordinator state from R2 — everything needed to resume after restart.
+pub struct RecoveredState {
+    pub accumulator: AccumulatorState,
+    pub coord_state: CoordinatorPersistentState,
+    pub registry: Vec<NodeRegistration>,
+}
+
+/// Recover all coordinator state from R2 on startup.
+///
+/// Loads accumulator, coordinator persistent state, and node registry.
+/// Missing state is initialized to defaults (fresh start).
+pub async fn recover_state_from_r2(storage: &Storage) -> RecoveredState {
+    let accumulator = load_accumulator(storage)
+        .await
+        .unwrap_or(AccumulatorState {
+            checkpoint_version: 0,
+            contributions: Vec::new(),
+            first_contribution_at: None,
+            version: 0,
+        });
+    info!(
+        "Recovered accumulator: v{}, {} contributions",
+        accumulator.checkpoint_version,
+        accumulator.contributions.len()
+    );
+
+    let coord_state = load_coordinator_state(storage).await;
+    info!(
+        "Recovered coordinator state: {} active nodes, {} total tokens",
+        coord_state.active_nodes, coord_state.total_tokens_trained
+    );
+
+    let registry = load_registry(storage).await.unwrap_or_default();
+    info!("Recovered node registry: {} nodes", registry.len());
+
+    RecoveredState {
+        accumulator,
+        coord_state,
+        registry,
+    }
+}
+
+/// Save all coordinator state to R2 atomically.
+///
+/// Called after every checkpoint production and periodically (every 30s).
+/// Saves accumulator, coordinator persistent state, and node registry.
+pub async fn save_state_to_r2(
+    storage: &Storage,
+    accumulator: &AccumulatorState,
+    coord_state: &CoordinatorPersistentState,
+) -> Result<()> {
+    // Save all state concurrently
+    let cs_path = paths::coordinator_state_path();
+    let (acc_result, cs_result) = tokio::join!(
+        save_accumulator(storage, accumulator),
+        storage.put_json(&cs_path, coord_state),
+    );
+
+    if let Err(e) = acc_result {
+        warn!("Failed to save accumulator: {e}");
+    }
+    if let Err(e) = cs_result {
+        warn!("Failed to save coordinator state: {e}");
+    }
+
+    Ok(())
 }
 

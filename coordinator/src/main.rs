@@ -61,26 +61,10 @@ async fn main() -> Result<()> {
     let storage = Storage::new(&config.storage).await?;
     storage.ensure_bucket().await?;
 
-    // Load initial state from R2 into memory
-    let accumulator = state::load_accumulator(&storage)
-        .await
-        .unwrap_or(AccumulatorState {
-            checkpoint_version: 0,
-            contributions: Vec::new(),
-            first_contribution_at: None,
-            version: 0,
-        });
-    info!(
-        "Loaded accumulator: v{}, {} contributions",
-        accumulator.checkpoint_version,
-        accumulator.contributions.len()
-    );
-
-    let coord_state = state::load_coordinator_state(&storage).await;
-    info!(
-        "Loaded coordinator state: {} active nodes, {} total tokens",
-        coord_state.active_nodes, coord_state.total_tokens_trained
-    );
+    // Recover all state from R2 (accumulator, coordinator state, registry)
+    let recovered = state::recover_state_from_r2(&storage).await;
+    let accumulator = recovered.accumulator;
+    let coord_state = recovered.coord_state;
 
     let app_state = Arc::new(AppState {
         storage,
@@ -101,18 +85,10 @@ async fn main() -> Result<()> {
                 let acc_snapshot = app.accumulator.read().await.clone();
                 let coord_snapshot = app.coord_state.read().await.clone();
 
-                if let Err(e) = state::save_accumulator(&app.storage, &acc_snapshot).await {
-                    warn!("Background flush: failed to save accumulator: {e}");
-                }
-                if let Err(e) = app
-                    .storage
-                    .put_json(
-                        &distrain_shared::paths::coordinator_state_path(),
-                        &coord_snapshot,
-                    )
-                    .await
+                if let Err(e) =
+                    state::save_state_to_r2(&app.storage, &acc_snapshot, &coord_snapshot).await
                 {
-                    warn!("Background flush: failed to save coordinator state: {e}");
+                    warn!("Background flush failed: {e}");
                 }
             }
         });

@@ -364,17 +364,13 @@ async fn push_delta(
                             cs.total_tokens_trained += tokens_this_checkpoint;
                         }
 
-                        // Immediate flush to S3 after checkpoint production
+                        // Immediate flush all state to R2 after checkpoint production
                         let acc_snap = agg_flag.accumulator.read().await.clone();
                         let cs_snap = agg_flag.coord_state.read().await.clone();
-                        if let Err(e) = state::save_accumulator(&storage, &acc_snap).await {
-                            warn!("Post-aggregation flush: failed to save accumulator: {e}");
-                        }
-                        if let Err(e) = storage
-                            .put_json(&distrain_shared::paths::coordinator_state_path(), &cs_snap)
-                            .await
+                        if let Err(e) =
+                            state::save_state_to_r2(&storage, &acc_snap, &cs_snap).await
                         {
-                            warn!("Post-aggregation flush: failed to save coordinator state: {e}");
+                            warn!("Post-aggregation flush failed: {e}");
                         }
                     }
                     Err(e) => {
