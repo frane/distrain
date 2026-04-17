@@ -530,13 +530,15 @@ async fn cleanup_old_versions(storage: &Storage, up_to_version: u64) -> Result<(
 }
 
 /// Decompress delta bytes: try zstd first, then raw JSON.
+/// Handles both v0.1 unstructured and v0.2 block-sparse formats automatically.
 fn decompress_delta_bytes(data: &[u8]) -> Result<HashMap<String, Vec<f32>>> {
-    // Try zstd-compressed first (burn-model has zstd-compression as default feature)
+    // Try zstd-compressed via model crate (handles low-rank, block-sparse, unstructured)
     if let Ok(delta) = distrain_model::compression::decompress_delta(data) {
         return Ok(delta);
     }
 
-    // Fallback to raw JSON (for WASM nodes that don't use zstd)
-    distrain_model::compression::decompress_delta_json(data)
-        .context("Failed to decompress delta (tried zstd and raw JSON)")
+    // Fallback to raw JSON with auto-format detection (block or unstructured)
+    distrain_model::compression::decompress_delta_json_auto(data)
+        .or_else(|_| distrain_model::compression::decompress_delta_json(data))
+        .context("Failed to decompress delta (tried zstd and raw JSON, both block and unstructured)")
 }
