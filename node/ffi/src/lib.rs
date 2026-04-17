@@ -530,7 +530,7 @@ pub extern "C" fn distrain_compute_delta(output_path: *const c_char) -> *mut c_c
         let current_params = s.module.extract_state_dict();
         let delta = compute_outer_delta(start_params, &current_params);
         let compression_config = CompressionConfig::default();
-        let compressed = match compress_delta(&delta, shapes, &compression_config, &mut s.error_buffer) {
+        let (compressed, _stats) = match compress_delta(&delta, shapes, &compression_config, &mut s.error_buffer) {
             Ok(c) => c,
             Err(e) => return error_cstring(&format!("compression failed: {e}")),
         };
