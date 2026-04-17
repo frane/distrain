@@ -6,6 +6,7 @@
 //! Gated behind the `p2p` feature flag. When disabled, the coordinator
 //! and node use direct HTTP (current behavior).
 
+pub mod cascade;
 #[cfg(feature = "p2p")]
 pub mod service;
 pub mod types;
