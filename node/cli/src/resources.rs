@@ -107,6 +107,63 @@ pub fn log_memory(label: &str) {
     info!("[mem] {label}: {used}MB used / {total}MB total ({free}MB free)");
 }
 
+/// VRAM-based training strategy for heterogeneous devices.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VramStrategy {
+    /// >= 24 GB: full model in VRAM, large batch.
+    FullModel,
+    /// >= 16 GB: gradient checkpointing enabled, medium batch.
+    GradientCheckpointing,
+    /// >= 8 GB: gradient checkpointing + optimizer state offload to CPU RAM.
+    CheckpointWithOffload,
+    /// < 8 GB: CPU-only training.
+    CpuOnly,
+}
+
+impl std::fmt::Display for VramStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VramStrategy::FullModel => write!(f, "full_model (VRAM >= 24GB)"),
+            VramStrategy::GradientCheckpointing => write!(f, "gradient_checkpointing (VRAM >= 16GB)"),
+            VramStrategy::CheckpointWithOffload => write!(f, "checkpoint_with_offload (VRAM >= 8GB)"),
+            VramStrategy::CpuOnly => write!(f, "cpu_only (VRAM < 8GB)"),
+        }
+    }
+}
+
+/// Determine optimal training strategy based on available VRAM.
+///
+/// Returns the strategy and suggested batch size scaling factor.
+pub fn determine_vram_strategy(vram_mb: u64, model_config: &ModelConfig) -> (VramStrategy, f64) {
+    let param_count = model_config.param_count() as u64;
+    // BF16 model weights = 2 bytes per param
+    let model_vram_mb = param_count * 2 / (1024 * 1024);
+    // Training overhead (gradients, optimizer, activations) ~4x model weights
+    let training_vram_mb = model_vram_mb * 4;
+
+    info!(
+        "VRAM cascade: {vram_mb}MB available, model={model_vram_mb}MB, training_estimate={training_vram_mb}MB"
+    );
+
+    if vram_mb >= 24 * 1024 {
+        // Lots of VRAM: full model, large batch
+        info!("VRAM strategy: full_model — large batch enabled");
+        (VramStrategy::FullModel, 1.0)
+    } else if vram_mb >= 16 * 1024 {
+        // Medium VRAM: gradient checkpointing reduces activation memory ~60%
+        info!("VRAM strategy: gradient_checkpointing — activation memory reduced");
+        (VramStrategy::GradientCheckpointing, 0.75)
+    } else if vram_mb >= 8 * 1024 {
+        // Low VRAM: checkpoint + offload optimizer to CPU RAM
+        info!("VRAM strategy: checkpoint_with_offload — optimizer offloaded to CPU");
+        (VramStrategy::CheckpointWithOffload, 0.5)
+    } else {
+        // Very low VRAM: CPU-only training
+        info!("VRAM strategy: cpu_only — VRAM {vram_mb}MB insufficient for GPU training");
+        (VramStrategy::CpuOnly, 0.25)
+    }
+}
+
 /// Check if system memory usage exceeds `max_fraction + 10%` (abort threshold).
 ///
 /// Returns `true` if memory pressure is critical and the caller should shed load.
