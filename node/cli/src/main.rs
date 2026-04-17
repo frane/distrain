@@ -427,6 +427,45 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     // Shared measured upload bandwidth — written by background upload task, read by main loop
     let measured_upload_bps_shared = std::sync::Arc::new(std::sync::Mutex::new(None::<f64>));
 
+    // Graceful shutdown: SIGINT/SIGTERM saves state before exit
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let shutdown_flag = shutdown.clone();
+        let cache_dir_sig = cache_dir.clone();
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            #[cfg(unix)]
+            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to register SIGTERM handler");
+            #[cfg(unix)]
+            tokio::select! {
+                _ = ctrl_c => info!("Received SIGINT — saving state and shutting down"),
+                _ = sigterm.recv() => info!("Received SIGTERM — saving state and shutting down"),
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = ctrl_c.await;
+                info!("Received SIGINT — saving state and shutting down");
+            }
+            // Mark shutdown — the main loop checks this between rounds
+            shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Give the main loop a moment to save state, then force exit
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            warn!("Shutdown timeout — forcing exit");
+            // Save a minimal state.toml as a safety net
+            let state = distrain_node::resume::NodeState {
+                last_checkpoint_version: 0,
+                seq_num: 0,
+                shard_index: 0,
+                shard_offset: 0,
+                node_id: String::new(),
+                saved_at: chrono::Utc::now().to_rfc3339(),
+            };
+            let _ = state.save(&cache_dir_sig);
+            std::process::exit(0);
+        });
+    }
+
     loop {
         // Await previous background upload before starting new round
         if let Some(handle) = pending_upload.take() {
@@ -438,6 +477,27 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             // Sync measured bandwidth from background task
             measured_upload_bps = *measured_upload_bps_shared.lock().unwrap();
         }
+        // Check for graceful shutdown between rounds
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            info!("Shutdown requested — saving final state");
+            let node_state = distrain_node::resume::NodeState {
+                last_checkpoint_version: last_trained_version.unwrap_or(0),
+                seq_num,
+                shard_index: 0,
+                shard_offset: 0,
+                node_id: node_id.clone(),
+                saved_at: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Err(e) = node_state.save(&cache_dir) {
+                warn!("Failed to save state on shutdown: {e}");
+            }
+            if let Err(e) = distrain_node::resume::save_error_buffer(&error_buffer, &cache_dir) {
+                warn!("Failed to save error buffer on shutdown: {e}");
+            }
+            info!("State saved. Exiting.");
+            return Ok(());
+        }
+
         // Dynamic shard reduction: if previous round hit memory pressure, halve shards
         if memory_pressure_abort {
             let prev = shards_per_node;
