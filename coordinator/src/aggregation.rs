@@ -114,6 +114,18 @@ struct AggregationMetadata {
     outer_delta_norm: f64,
     aggregation_time_secs: f64,
     outer_lr: f64,
+    /// Average training loss across contributions.
+    #[serde(default)]
+    avg_loss: f64,
+    /// Total tokens processed in this checkpoint cycle.
+    #[serde(default)]
+    total_tokens: u64,
+    /// ISO 8601 timestamp.
+    #[serde(default)]
+    timestamp: String,
+    /// Node IDs that contributed to this checkpoint.
+    #[serde(default)]
+    contributing_nodes: Vec<String>,
 }
 
 /// Persisted state for adaptive outer optimizer.
@@ -417,6 +429,10 @@ pub async fn run_aggregation(
         outer_delta_norm: delta_norm,
         aggregation_time_secs: elapsed,
         outer_lr,
+        avg_loss: if accepted > 0 { loss_sum / accepted as f64 } else { 0.0 },
+        total_tokens: tokens_sum,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        contributing_nodes: acc.contributions.iter().map(|c| c.node_id.0.clone()).collect(),
     };
     storage
         .put_json(&paths::checkpoint_metadata_path(new_version), &metadata)
@@ -454,10 +470,11 @@ pub async fn run_aggregation(
 
     info!("Aggregation complete: checkpoint v{new_version} in {elapsed:.1}s, delta_norm={delta_norm:.4}");
 
-    // Housekeeping: delete old checkpoints, deltas, and optimizer state from R2.
-    // Keep only the last `keep_versions` versions to prevent unbounded storage growth.
-    if new_version > keep_versions {
-        let delete_up_to = new_version - keep_versions;
+    // Housekeeping: keep last 20 checkpoints, archive every 10th permanently.
+    // Deltas and optimizer state for old versions are always deleted.
+    let archival_window = keep_versions.max(20);
+    if new_version > archival_window {
+        let delete_up_to = new_version - archival_window;
         tokio::spawn({
             let storage = storage.clone();
             async move {
@@ -472,20 +489,16 @@ pub async fn run_aggregation(
 }
 
 /// Delete old checkpoints, deltas, and optimizer state up to (but not including) `up_to_version`.
+/// Every 10th checkpoint (v0, v10, v20, ...) is archived permanently and never deleted.
 async fn cleanup_old_versions(storage: &Storage, up_to_version: u64) -> Result<()> {
     let mut deleted = 0u64;
+    let mut archived = 0u64;
     for v in 0..up_to_version {
-        // Try deleting each type — ignore errors (may already be deleted)
-        for key in [
-            paths::checkpoint_path(v),
-            paths::checkpoint_metadata_path(v),
-            paths::optimizer_state_path(v),
-        ] {
-            if storage.delete(&key).await.is_ok() {
-                deleted += 1;
-            }
-        }
-        // Delete all deltas for this version (list then delete)
+        let is_archive = v % 10 == 0;
+
+        // Always delete deltas and optimizer state (large, not needed after merge)
+        if let Err(_) = storage.delete(&paths::optimizer_state_path(v)).await {} else { deleted += 1; }
+
         let prefix = format!("deltas/v{v}/");
         if let Ok(keys) = storage.list_keys(&prefix).await {
             for key in keys {
@@ -493,9 +506,25 @@ async fn cleanup_old_versions(storage: &Storage, up_to_version: u64) -> Result<(
                 deleted += 1;
             }
         }
+
+        if is_archive {
+            // Keep checkpoint + metadata for archive versions
+            archived += 1;
+            continue;
+        }
+
+        // Delete non-archived checkpoints and metadata
+        for key in [
+            paths::checkpoint_path(v),
+            paths::checkpoint_metadata_path(v),
+        ] {
+            if storage.delete(&key).await.is_ok() {
+                deleted += 1;
+            }
+        }
     }
-    if deleted > 0 {
-        info!("Housekeeping: deleted {deleted} old objects (versions < v{up_to_version})");
+    if deleted > 0 || archived > 0 {
+        info!("Housekeeping: deleted {deleted} objects, preserved {archived} archived checkpoints (versions < v{up_to_version})");
     }
     Ok(())
 }
