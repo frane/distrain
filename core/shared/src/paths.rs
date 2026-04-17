@@ -18,6 +18,12 @@ pub fn delta_path(version: u64, node_id: &str, seq_num: u64) -> String {
     format!("deltas/v{version}/{node_id}_{seq_num}.delta.zst")
 }
 
+/// Compressed delta between two consecutive checkpoint versions.
+/// Nodes can download this instead of the full checkpoint for faster updates.
+pub fn checkpoint_delta_path(version: u64, from_version: u64) -> String {
+    format!("checkpoints/v{version}/delta_from_v{from_version}.bin")
+}
+
 pub fn accumulator_path() -> String {
     "accumulator/current.json".to_string()
 }

@@ -455,6 +455,28 @@ pub async fn run_aggregation(
         .await
         .context("Failed to upload new checkpoint")?;
 
+    // 6b. Compute and upload checkpoint delta (for incremental node downloads).
+    // Delta = new_checkpoint - old_checkpoint, compressed with INT8 + zstd.
+    // Best-effort: don't fail aggregation if delta computation fails.
+    if acc.checkpoint_version > 0 {
+        let old_params = load_safetensors_map_from_bytes(&ckpt_bytes);
+        if let Ok(old_params) = old_params {
+            tokio::spawn({
+                let storage = storage.clone();
+                let new_params = checkpoint.clone();
+                let shapes = shapes.clone();
+                let prev_version = acc.checkpoint_version;
+                async move {
+                    if let Err(e) = compute_and_upload_checkpoint_delta(
+                        &storage, &old_params, &new_params, &shapes, new_version, prev_version,
+                    ).await {
+                        warn!("Failed to compute checkpoint delta: {e}");
+                    }
+                }
+            });
+        }
+    }
+
     // 7. Upload optimizer velocity state as safetensors
     let vel_state: HashMap<String, Vec<f32>> = velocity
         .unwrap_or_default()
@@ -541,6 +563,60 @@ pub async fn run_aggregation(
     }
 
     Ok((new_version, tokens_this_checkpoint, node_ids))
+}
+
+/// Compute checkpoint delta (new - old), compress with INT8 + zstd, upload to R2.
+/// Nodes can download this instead of the full checkpoint for faster updates.
+async fn compute_and_upload_checkpoint_delta(
+    storage: &Storage,
+    old_params: &HashMap<String, Vec<f32>>,
+    new_params: &HashMap<String, Vec<f32>>,
+    shapes: &HashMap<String, Vec<usize>>,
+    new_version: u64,
+    from_version: u64,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+
+    // Compute delta: new - old
+    let mut delta: HashMap<String, Vec<f32>> = HashMap::new();
+    for (name, new_vals) in new_params {
+        if let Some(old_vals) = old_params.get(name) {
+            if new_vals.len() == old_vals.len() {
+                let d: Vec<f32> = new_vals.iter().zip(old_vals.iter())
+                    .map(|(n, o)| n - o)
+                    .collect();
+                delta.insert(name.clone(), d);
+            }
+        }
+    }
+
+    if delta.is_empty() {
+        return Ok(());
+    }
+
+    // Use the model's compression pipeline: top-k 100% + INT8 + zstd
+    let config = distrain_model::compression::CompressionConfig {
+        top_k_fraction: 1.0, // keep everything (checkpoint delta is dense)
+        quantize_int8: true,
+        zstd_level: 3,
+        per_tensor_adaptive: false,
+        ..Default::default()
+    };
+    let mut dummy_buf = distrain_model::compression::ErrorBuffer::new();
+    let (compressed, _) = distrain_model::compression::compress_delta(
+        &delta, shapes, &config, &mut dummy_buf,
+    ).context("Failed to compress checkpoint delta")?;
+
+    let key = paths::checkpoint_delta_path(new_version, from_version);
+    let compressed_mb = compressed.len() as f64 / (1024.0 * 1024.0);
+    storage.put(&key, compressed).await
+        .context("Failed to upload checkpoint delta")?;
+
+    info!(
+        "Checkpoint delta v{from_version}→v{new_version}: {compressed_mb:.1}MB, {:.2}s",
+        start.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 /// Delete old checkpoints, deltas, and optimizer state up to (but not including) `up_to_version`.

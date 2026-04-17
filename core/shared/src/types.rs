@@ -76,6 +76,13 @@ pub struct CheckpointInfo {
     pub total_contributions: u64,
     pub total_tokens: u64,
     pub created_at: DateTime<Utc>,
+    /// R2 key for the checkpoint delta (new_checkpoint - prev_checkpoint, compressed).
+    /// Nodes can download this instead of the full checkpoint for faster updates.
+    #[serde(default)]
+    pub delta_key: Option<String>,
+    /// Version this delta is relative to (previous checkpoint version).
+    #[serde(default)]
+    pub delta_from_version: Option<u64>,
 }
 
 /// CRDT accumulator state persisted to R2 as JSON.

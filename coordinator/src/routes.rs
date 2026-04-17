@@ -425,6 +425,11 @@ async fn push_delta(
 /// GET /checkpoint/latest — current checkpoint info.
 async fn get_latest_checkpoint(State(app): State<Arc<AppState>>) -> impl IntoResponse {
     let version = app.accumulator.read().await.checkpoint_version;
+    let delta_key = if version > 0 {
+        Some(distrain_shared::paths::checkpoint_delta_path(version, version - 1))
+    } else {
+        None
+    };
     let info = CheckpointInfo {
         version,
         checkpoint_key: distrain_shared::paths::checkpoint_path(version),
@@ -433,6 +438,8 @@ async fn get_latest_checkpoint(State(app): State<Arc<AppState>>) -> impl IntoRes
         total_contributions: 0,
         total_tokens: 0,
         created_at: Utc::now(),
+        delta_key,
+        delta_from_version: if version > 0 { Some(version - 1) } else { None },
     };
 
     Json(info)
