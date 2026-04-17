@@ -234,6 +234,23 @@ async fn push_delta(
             push.node_id,
             reason.as_deref().unwrap_or("unknown")
         );
+
+        // Post to replay board if rejected due to extreme staleness (13+)
+        let staleness_val = current_version.saturating_sub(push.checkpoint_version);
+        if staleness_val >= 13 {
+            let request = crate::proxy_replay::create_replay_request(
+                &push.node_id.0,
+                current_version,
+                staleness_val,
+                push.training_loss,
+                push.inner_steps,
+                4, // expire after 4 hours
+            );
+            let replay_storage = app.storage.clone();
+            tokio::spawn(async move {
+                crate::proxy_replay::post_replay_request(&replay_storage, &request).await;
+            });
+        }
     }
 
     METRICS

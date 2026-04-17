@@ -68,9 +68,9 @@ pub fn apply_delta_push(
 ) -> (bool, Option<String>, bool) {
     let staleness = acc.checkpoint_version.saturating_sub(push.checkpoint_version);
 
-    // Staleness check
+    // Staleness check — very stale deltas (13+) are logged for proxy replay
     if staleness > max_staleness {
-        return (false, Some(format!("Too stale: {staleness} > {max_staleness}")), false);
+        return (false, Some(format!("Too stale: {staleness} > {max_staleness} (replay board candidate)")), false);
     }
 
     // Idempotent: reject if we have same or newer seq_num from this node

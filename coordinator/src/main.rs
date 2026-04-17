@@ -5,6 +5,7 @@
 
 pub mod aggregation;
 pub mod metrics;
+pub mod proxy_replay;
 mod routes;
 pub mod stats;
 pub mod state;
