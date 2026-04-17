@@ -159,6 +159,15 @@ fn load_config() -> CoordinatorConfig {
     if let Ok(v) = std::env::var("S3_EXTERNAL_ENDPOINT") {
         config.external_storage_endpoint = Some(v);
     }
+    if let Ok(v) = std::env::var("ENABLE_REBASING") {
+        config.enable_rebasing = v.parse().unwrap_or(true);
+    }
+    if let Ok(v) = std::env::var("REBASING_THRESHOLD") {
+        config.rebasing_threshold = v.parse().unwrap_or(3);
+    }
+    if let Ok(v) = std::env::var("REBASING_COEFFICIENT") {
+        config.rebasing_coefficient = v.parse().unwrap_or(0.5);
+    }
 
     config
 }

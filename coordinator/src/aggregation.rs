@@ -155,10 +155,37 @@ fn compute_loss_based_outer_lr(_current_lr: f64, avg_loss: f64, ln_vocab: f64) -
     (1.0, 1.0, ratio)
 }
 
+/// Rebase a stale delta by subtracting model drift.
+///
+/// When a node trained against an old checkpoint (v_old), but the model has since
+/// advanced to v_current, the delta contains both the node's novel signal AND
+/// redundant updates that the model already learned. Rebasing removes the redundant part.
+///
+/// drift = checkpoint(v_current) - checkpoint(v_old)
+/// rebased_delta = delta - coefficient * drift
+fn rebase_delta(
+    delta: &mut HashMap<String, Vec<f32>>,
+    old_checkpoint: &HashMap<String, Vec<f32>>,
+    current_checkpoint: &HashMap<String, Vec<f32>>,
+    coefficient: f64,
+) {
+    let coeff = coefficient as f32;
+    for (name, delta_vals) in delta.iter_mut() {
+        if let (Some(old), Some(cur)) = (old_checkpoint.get(name), current_checkpoint.get(name)) {
+            if old.len() == delta_vals.len() && cur.len() == delta_vals.len() {
+                for i in 0..delta_vals.len() {
+                    let drift = cur[i] - old[i];
+                    delta_vals[i] -= coeff * drift;
+                }
+            }
+        }
+    }
+}
+
 /// Run the full aggregation pipeline in pure Rust.
 ///
 /// 1. Download checkpoint + optimizer velocity + all deltas from R2
-/// 2. Decompress and validate each delta
+/// 2. Decompress and validate each delta (rebase stale deltas if enabled)
 /// 3. Compute weighted average
 /// 4. Apply Nesterov outer optimizer step
 /// 5. Upload new checkpoint, velocity, and metadata to R2
@@ -170,6 +197,9 @@ pub async fn run_aggregation(
     outer_momentum: f64,
     keep_versions: u64,
     vocab_size: u32,
+    enable_rebasing: bool,
+    rebasing_threshold: u64,
+    rebasing_coefficient: f64,
 ) -> Result<(u64, u64, Vec<String>)> {
     let start = std::time::Instant::now();
     let new_version = acc.checkpoint_version + 1;
@@ -307,12 +337,37 @@ pub async fn run_aggregation(
             continue;
         }
 
+        // Delta rebasing: subtract model drift for stale deltas
+        let staleness = acc.checkpoint_version.saturating_sub(contrib.checkpoint_version);
+        if enable_rebasing && staleness > rebasing_threshold {
+            // Load the old checkpoint the delta was trained against
+            let old_ckpt_key = paths::checkpoint_path(contrib.checkpoint_version);
+            match storage.get(&old_ckpt_key).await {
+                Ok(old_bytes) => {
+                    if let Ok(old_params) = load_safetensors_map_from_bytes(&old_bytes) {
+                        rebase_delta(&mut delta, &old_params, &checkpoint, rebasing_coefficient);
+                        info!(
+                            "Rebased delta from {} (staleness {staleness}): subtracted {:.0}% drift (v{} → v{})",
+                            &contrib.node_id.0[..12],
+                            rebasing_coefficient * 100.0,
+                            contrib.checkpoint_version,
+                            acc.checkpoint_version,
+                        );
+                    } else {
+                        warn!("Could not parse old checkpoint v{} for rebasing, merging as-is", contrib.checkpoint_version);
+                    }
+                }
+                Err(_) => {
+                    warn!("Old checkpoint v{} not in R2 for rebasing (may have been pruned), merging as-is", contrib.checkpoint_version);
+                }
+            }
+        }
+
         // Per-delta instrumentation
         let dnorm_sq: f64 = delta.values()
             .map(|v| v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>())
             .sum();
         let dnorm = dnorm_sq.sqrt();
-        let staleness = acc.checkpoint_version.saturating_sub(contrib.checkpoint_version);
         info!(
             "  delta from {} (v{}): norm={dnorm:.4}, weight={:.4}, steps={}, staleness={}",
             &contrib.node_id.0[..12], contrib.checkpoint_version,

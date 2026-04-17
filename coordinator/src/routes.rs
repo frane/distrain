@@ -309,6 +309,9 @@ async fn push_delta(
             let outer_momentum = app.config.outer_momentum;
             let keep_versions = app.config.keep_versions;
             let vocab_size = app.config.vocab_size;
+            let enable_rebasing = app.config.enable_rebasing;
+            let rebasing_threshold = app.config.rebasing_threshold;
+            let rebasing_coefficient = app.config.rebasing_coefficient;
             let agg_flag = Arc::clone(&app);
 
             tokio::spawn(async move {
@@ -320,6 +323,9 @@ async fn push_delta(
                     outer_momentum,
                     keep_versions,
                     vocab_size,
+                    enable_rebasing,
+                    rebasing_threshold,
+                    rebasing_coefficient,
                 )
                 .await
                 {

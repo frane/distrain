@@ -55,6 +55,16 @@ pub struct CoordinatorConfig {
     /// an external URL (e.g. http://PUBLIC_IP:9000).
     #[serde(default)]
     pub external_storage_endpoint: Option<String>,
+
+    /// Enable delta rebasing for stale deltas. Subtracts model drift before merge.
+    #[serde(default = "default_enable_rebasing")]
+    pub enable_rebasing: bool,
+    /// Staleness threshold above which rebasing kicks in.
+    #[serde(default = "default_rebasing_threshold")]
+    pub rebasing_threshold: u64,
+    /// How much drift to subtract (0.0-1.0). 0.5 = conservative, 1.0 = full.
+    #[serde(default = "default_rebasing_coefficient")]
+    pub rebasing_coefficient: f64,
 }
 
 impl Default for CoordinatorConfig {
@@ -73,9 +83,16 @@ impl Default for CoordinatorConfig {
             min_weight: default_min_weight(),
             max_storage_gb: 0,
             external_storage_endpoint: None,
+            enable_rebasing: default_enable_rebasing(),
+            rebasing_threshold: default_rebasing_threshold(),
+            rebasing_coefficient: default_rebasing_coefficient(),
         }
     }
 }
+
+fn default_enable_rebasing() -> bool { true }
+fn default_rebasing_threshold() -> u64 { 3 }
+fn default_rebasing_coefficient() -> f64 { 0.5 }
 
 /// Node client configuration (loaded from TOML).
 #[derive(Debug, Clone, Serialize, Deserialize)]
