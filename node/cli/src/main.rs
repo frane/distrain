@@ -466,6 +466,7 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
     let mut measured_upload_bps: Option<f64> = None;
     // Persistent error buffer for compression error feedback across rounds.
     let mut error_buffer = distrain_model::compression::ErrorBuffer::new();
+    let mut importance_tracker = distrain_model::importance::ImportanceTracker::new(0.9);
 
     // Try to resume from saved state
     if let Ok(Some(saved_state)) = distrain_node::resume::NodeState::load(&cache_dir) {
@@ -486,6 +487,14 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
         }
         Ok(None) => {}
         Err(e) => warn!("Failed to load error buffer (starting fresh): {e}"),
+    }
+    match distrain_node::resume::load_importance_tracker(&cache_dir) {
+        Ok(Some(it)) => {
+            info!("Resumed importance tracker ({} tensors)", it.num_tensors());
+            importance_tracker = it;
+        }
+        Ok(None) => {}
+        Err(e) => warn!("Failed to load importance tracker (starting fresh): {e}"),
     }
     // Last round's elapsed time (for poll delay estimation).
     let mut _result_elapsed: f64 = 0.0;
@@ -574,6 +583,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             }
             if let Err(e) = distrain_node::resume::save_error_buffer(&error_buffer, &cache_dir) {
                 warn!("Failed to save error buffer on shutdown: {e}");
+            }
+            if let Err(e) = distrain_node::resume::save_importance_tracker(&importance_tracker, &cache_dir) {
+                warn!("Failed to save importance tracker on shutdown: {e}");
             }
             info!("State saved. Exiting.");
             return Ok(());
@@ -1085,6 +1097,9 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             }
             if let Err(e) = distrain_node::resume::save_error_buffer(&error_buffer, &cache_dir) {
                 warn!("Failed to save error buffer: {e}");
+            }
+            if let Err(e) = distrain_node::resume::save_importance_tracker(&importance_tracker, &cache_dir) {
+                warn!("Failed to save importance tracker: {e}");
             }
         }
 

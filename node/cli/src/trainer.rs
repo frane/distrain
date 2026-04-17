@@ -83,7 +83,7 @@ pub fn compress_with_config(
     raw_param_bytes: u64,
     error_buffer: &mut ErrorBuffer,
     config: &distrain_shared::config::NodeConfig,
-    importance: Option<&distrain_model::importance::ImportanceTracker>,
+    mut importance: Option<&mut distrain_model::importance::ImportanceTracker>,
 ) -> Result<(Vec<u8>, CompressionStats)> {
     let pipeline = &config.compression_pipeline;
     let top_k = config
@@ -99,28 +99,12 @@ pub fn compress_with_config(
         ..CompressionConfig::default()
     };
 
-    if pipeline == "block" {
-        // Block sparsity: row-level selection for 2D, unstructured for 1D
-        if config.use_importance {
-            if let Some(tracker) = importance {
-                // Importance-weighted block selection
-                let row_imp = tracker.compute_row_importance(delta, shapes);
-                let delta_with_error = error_buffer.apply(delta);
-                let (row_indices, values, sparse) =
-                    distrain_model::compression::sparsify_block_importance(
-                        &delta_with_error,
-                        shapes,
-                        top_k,
-                        &row_imp,
-                    );
-                error_buffer.update(&delta_with_error, &sparse);
+    // Update importance tracker with this round's delta (before compression)
+    if let Some(ref mut tracker) = importance {
+        tracker.update(delta);
+    }
 
-                // Re-run through the full block pipeline with pre-selected data
-                // (bypasses the selection step since we already selected)
-                // For now, just use the standard block pipeline — importance affects selection
-                info!("Using importance-weighted block sparsity (top-k={top_k:.1}%)");
-            }
-        }
+    if pipeline == "block" {
         compress_delta_block(delta, shapes, &compression_config, error_buffer)
     } else {
         // Unstructured (v0.1 compatible)
