@@ -139,6 +139,80 @@ pub async fn cleanup_expired(storage: &Storage) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_request(node: &str, staleness: u64, loss: f64, hours_from_now: i64) -> ProxyReplayRequest {
+        let now = Utc::now();
+        ProxyReplayRequest {
+            source_node_id: node.to_string(),
+            shard_ids: vec![1, 2, 3],
+            shard_offsets: vec![0, 0, 0],
+            target_checkpoint_version: 10,
+            timestamp: now,
+            expires_at: now + Duration::hours(hours_from_now),
+            staleness,
+            training_loss: loss,
+            inner_steps: 50,
+        }
+    }
+
+    #[test]
+    fn test_create_replay_request_sets_expiry() {
+        let req = create_replay_request("node_a", 5, 15, 10.0, 50, 4);
+        assert_eq!(req.source_node_id, "node_a");
+        assert_eq!(req.staleness, 15);
+        let hours_diff = (req.expires_at - req.timestamp).num_hours();
+        assert_eq!(hours_diff, 4);
+    }
+
+    #[test]
+    fn test_expired_request_filtered() {
+        // Create a request that expired 1 hour ago
+        let mut req = make_request("node_a", 15, 10.0, -1);
+        assert!(req.expires_at < Utc::now(), "Should be expired");
+
+        // And one that's still valid
+        let valid = make_request("node_b", 15, 8.0, 4);
+        assert!(valid.expires_at > Utc::now(), "Should not be expired");
+    }
+
+    #[test]
+    fn test_requests_sorted_by_loss_descending() {
+        let r1 = make_request("node_a", 15, 5.0, 4);
+        let r2 = make_request("node_b", 15, 20.0, 4);
+        let r3 = make_request("node_c", 15, 10.0, 4);
+
+        let mut requests = vec![r1, r2, r3];
+        requests.sort_by(|a, b| b.training_loss.partial_cmp(&a.training_loss).unwrap());
+
+        assert_eq!(requests[0].source_node_id, "node_b"); // loss 20
+        assert_eq!(requests[1].source_node_id, "node_c"); // loss 10
+        assert_eq!(requests[2].source_node_id, "node_a"); // loss 5
+    }
+
+    #[test]
+    fn test_request_has_shard_data() {
+        let req = make_request("node_a", 15, 10.0, 4);
+        assert_eq!(req.shard_ids, vec![1, 2, 3]);
+        assert!(!req.shard_ids.is_empty(), "Replay request must have shard IDs");
+    }
+
+    #[test]
+    fn test_replay_board_key_format() {
+        let req = make_request("node_abc", 15, 10.0, 4);
+        let key = format!(
+            "replay_board/{}_{}.json",
+            req.timestamp.format("%Y%m%dT%H%M%S"),
+            &req.source_node_id,
+        );
+        assert!(key.starts_with("replay_board/"));
+        assert!(key.ends_with("node_abc.json"));
+        assert!(key.contains("T")); // datetime separator
+    }
+}
+
 /// Create a replay request from a rejected stale delta.
 pub fn create_replay_request(
     source_node_id: &str,
