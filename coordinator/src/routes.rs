@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/heartbeat", post(heartbeat))
         .route("/health", get(health))
         .route("/metrics", get(metrics))
+        .route("/replay_board", get(get_replay_board))
 }
 
 /// POST /nodes/register — register a new node.
@@ -568,6 +569,12 @@ async fn heartbeat(
         should_abort,
         latest_version: Some(current_version),
     })
+}
+
+/// GET /replay_board — list pending proxy replay requests.
+async fn get_replay_board(State(app): State<Arc<AppState>>) -> impl IntoResponse {
+    let requests = crate::proxy_replay::list_replay_requests(&app.storage).await;
+    Json(serde_json::to_value(&requests).unwrap_or_default())
 }
 
 /// GET /health — health check.

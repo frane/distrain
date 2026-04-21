@@ -1392,6 +1392,119 @@ async fn run_training_loop(mut config: NodeConfig) -> Result<()> {
             }
         }
 
+        // Check replay board: if a request targets our current version and has
+        // shard IDs, claim it and train on those shards as a bonus round.
+        // This runs in the background — doesn't block the main training loop.
+        {
+            let replay_coord = coordinator.clone();
+            let replay_storage = storage.clone();
+            let replay_node_id = node_id.clone();
+            let replay_cache = cache_dir.clone();
+            let replay_version = version;
+            let replay_config = config.clone();
+            let replay_h_mini = h_mini;
+            let replay_batch_size = batch_size;
+            let replay_seq_len = config.seq_len;
+            tokio::spawn(async move {
+                let requests = match replay_coord.get_replay_board().await {
+                    Ok(r) if !r.is_empty() => r,
+                    _ => return,
+                };
+
+                // Find a request for our current checkpoint version with shard data
+                for req in &requests {
+                    let shard_ids: Vec<u32> = match req.get("shard_ids").and_then(|v| {
+                        serde_json::from_value::<Vec<u32>>(v.clone()).ok()
+                    }) {
+                        Some(ids) if !ids.is_empty() => ids,
+                        _ => continue,
+                    };
+                    let target_v = match req.get("target_checkpoint_version").and_then(|v| v.as_u64()) {
+                        Some(v) if v == replay_version => v,
+                        _ => continue,
+                    };
+                    let source = req.get("source_node_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+                    info!("Replay: claiming request from {} ({} shards, target v{})", source, shard_ids.len(), target_v);
+
+                    // Claim by deleting from board (first-come-first-served)
+                    let claim_key = format!(
+                        "replay_board/{}_{}.json",
+                        req.get("timestamp").and_then(|v| v.as_str()).unwrap_or(""),
+                        source,
+                    );
+                    if replay_storage.delete(&claim_key).await.is_err() {
+                        continue; // already claimed
+                    }
+
+                    // Download the shards and train
+                    let ckpt_path = replay_cache.join(format!("v{replay_version}_model.safetensors"));
+                    if !ckpt_path.exists() {
+                        warn!("Replay: checkpoint v{replay_version} not cached, skipping");
+                        break;
+                    }
+
+                    // Build a data loader from the replay shards
+                    let shard_names: Vec<String> = shard_ids.iter().map(|id| format!("shard_{id:04}.bin")).collect();
+                    let loader = match data::StreamingDataLoader::new(
+                        replay_storage.clone(), shard_names, replay_cache.clone(),
+                        replay_seq_len, 3,
+                    ).await {
+                        Ok(l) => l,
+                        Err(e) => { warn!("Replay: failed to load shards: {e}"); break; }
+                    };
+                    let mut dl = match loader.to_data_loader(replay_batch_size) {
+                        Ok(d) => d,
+                        Err(e) => { warn!("Replay: failed to create data loader: {e}"); break; }
+                    };
+
+                    // Train on the replay data
+                    let delta_path = replay_cache.join(format!("replay_delta_{}.delta.zst", source));
+                    let mut replay_eb = distrain_model::compression::ErrorBuffer::new();
+                    let replay_result = trainer::run_training_with_progress(
+                        &replay_config, &ckpt_path, replay_h_mini, &delta_path,
+                        &mut dl, &mut replay_eb, replay_batch_size, 1,
+                        |_| false, // no abort
+                    ).await;
+
+                    match replay_result {
+                        Ok(result) => {
+                            info!("Replay training done: {} steps, loss={:.4}", result.steps_completed, result.final_loss);
+                            // Upload and push the fresh delta
+                            let replay_delta_key = distrain_shared::paths::delta_path(
+                                replay_version, &format!("replay_{}", replay_node_id), 0,
+                            );
+                            if let Ok(()) = replay_storage.upload_from_file(&replay_delta_key, &delta_path).await {
+                                let push = distrain_shared::types::DeltaPush {
+                                    node_id: distrain_shared::types::NodeId(format!("replay_{}", replay_node_id)),
+                                    seq_num: 0,
+                                    checkpoint_version: replay_version,
+                                    inner_steps: result.steps_completed,
+                                    delta_key: replay_delta_key,
+                                    training_loss: result.final_loss,
+                                    tokens_processed: result.tokens_processed,
+                                    training_time_secs: result.elapsed_secs,
+                                    compressed_bytes: result.compression_stats.as_ref().map(|s| s.compressed_bytes),
+                                    dense_norm: result.compression_stats.as_ref().map(|s| s.dense_norm),
+                                    sparse_norm: result.compression_stats.as_ref().map(|s| s.sparse_norm),
+                                    shard_ids: Some(shard_ids.clone()),
+                                };
+                                match replay_coord.push_delta(&push).await {
+                                    Ok(resp) if resp.accepted => info!("Replay delta accepted (v{})", resp.checkpoint_version),
+                                    Ok(resp) => info!("Replay delta rejected: {}", resp.reason.unwrap_or_default()),
+                                    Err(e) => warn!("Replay push failed: {e}"),
+                                }
+                            }
+                            let _ = tokio::fs::remove_file(&delta_path).await;
+                        }
+                        Err(e) => warn!("Replay training failed: {e}"),
+                    }
+
+                    break; // one replay per round
+                }
+            });
+        }
+
         // Continue immediately to next round — upload proceeds in background
     }
 

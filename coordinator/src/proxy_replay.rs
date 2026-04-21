@@ -4,12 +4,9 @@
 //! it from the merge but saves the data manifest (which shards, offsets the
 //! slow node trained on) to a bulletin board in R2.
 //!
-//! Fast nodes that finish a round and have idle capacity can voluntarily
-//! check the board, grab a request, train on that data against the current
+//! Fast nodes that finish a round and have idle capacity voluntarily check
+//! the board, grab a request, train on that data against the current
 //! checkpoint, and push a fresh delta. No assignment, no obligation.
-//!
-//! The node consumer side is NOT implemented yet. This module only writes
-//! to the board.
 
 use chrono::{DateTime, Duration, Utc};
 use distrain_shared::storage::Storage;
@@ -63,6 +60,82 @@ pub async fn post_replay_request(
         Err(e) => {
             warn!("Failed to post replay request: {e}");
         }
+    }
+}
+
+/// List all pending replay requests from the board.
+/// Returns requests sorted by training_loss (highest loss = most value to replay).
+/// Filters out expired requests.
+pub async fn list_replay_requests(storage: &Storage) -> Vec<ProxyReplayRequest> {
+    let keys = match storage.list_keys("replay_board/").await {
+        Ok(k) => k,
+        Err(e) => {
+            warn!("Failed to list replay board: {e}");
+            return Vec::new();
+        }
+    };
+
+    let now = Utc::now();
+    let mut requests = Vec::new();
+
+    for key in &keys {
+        if let Ok(req) = storage.get_json::<ProxyReplayRequest>(key).await {
+            if req.expires_at > now {
+                requests.push(req);
+            }
+        }
+    }
+
+    // Highest loss first (most value to replay)
+    requests.sort_by(|a, b| b.training_loss.partial_cmp(&a.training_loss).unwrap_or(std::cmp::Ordering::Equal));
+    requests
+}
+
+/// Claim a replay request by deleting it from the board.
+/// Returns the request if it still existed (first-come-first-served).
+pub async fn claim_replay_request(
+    storage: &Storage,
+    request: &ProxyReplayRequest,
+) -> bool {
+    let key = format!(
+        "replay_board/{}_{}.json",
+        request.timestamp.format("%Y%m%dT%H%M%S"),
+        &request.source_node_id,
+    );
+
+    match storage.delete(&key).await {
+        Ok(()) => {
+            info!(
+                "Claimed replay request: node={}, target v{}",
+                request.source_node_id, request.target_checkpoint_version,
+            );
+            true
+        }
+        Err(_) => false, // already claimed by another node
+    }
+}
+
+/// Clean up expired replay requests from the board.
+pub async fn cleanup_expired(storage: &Storage) {
+    let keys = match storage.list_keys("replay_board/").await {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+
+    let now = Utc::now();
+    let mut cleaned = 0;
+
+    for key in &keys {
+        if let Ok(req) = storage.get_json::<ProxyReplayRequest>(key).await {
+            if req.expires_at <= now {
+                let _ = storage.delete(key).await;
+                cleaned += 1;
+            }
+        }
+    }
+
+    if cleaned > 0 {
+        info!("Replay board cleanup: removed {cleaned} expired requests");
     }
 }
 

@@ -148,6 +148,20 @@ impl CoordinatorClient {
             .context("Failed to parse auto-config response")
     }
 
+    /// Fetch pending replay requests from the bulletin board.
+    pub async fn get_replay_board(&self) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .http
+            .get(format!("{}/replay_board", self.base_url))
+            .send()
+            .await
+            .context("Failed to get replay board")?;
+
+        resp.json::<Vec<serde_json::Value>>()
+            .await
+            .context("Failed to parse replay board")
+    }
+
     /// Get training status.
     pub async fn get_status(&self) -> Result<TrainingStatus> {
         let resp = self
